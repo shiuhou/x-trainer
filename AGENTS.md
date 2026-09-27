@@ -34,3 +34,13 @@ specific `README_NOVA_TELEOP.md` or `docs/` checkpoint before changing behavior.
 
 The workspace-level coordination rules are in the parent repository's
 `AGENTS.md`, `README.md`, `HANDOFF.md` and `components.lock.yaml`.
+
+## Git ownership
+
+This sanitized checkout publishes to `https://github.com/shiuhou/x-trainer.git`.
+Only reviewed sanitized changes belong here; commit and push them to
+`origin/main`, then update the parent meta repository by pinning
+`components/x-trainer` and its matching `components.lock.yaml` entry. Never
+publish directly from the original local `/home/dsa/project/dobot/x-trainer`
+upstream checkout, and never commit component source as ordinary files in the
+meta repository.
