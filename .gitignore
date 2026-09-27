@@ -55,6 +55,13 @@ _build
 # Teleop Recorded Dataset
 datasets/*
 !datasets/.gitkeep
+teleop_traces/*
+
+# Machine-specific credentials, serial paths and camera identifiers.
+source/leisaac/leisaac/xtrainer_utils/utils/dobot_config/dobot_settings.ini
+source/leisaac/leisaac/xtrainer_utils/utils/dobot_config/dobot_settings copy.ini
+source/leisaac/leisaac/xtrainer_utils/XLeVR/key.pem
+source/leisaac/leisaac/xtrainer_utils/XLeVR/cert.pem
 
 # Docker history
 .isaac-lab-docker-history

@@ -1,0 +1,54 @@
+# Nova gripper geometry record.
+# Dimensions below have been confirmed on the physical gripper. They still
+# describe finger geometry only; they are not a flange-relative TCP.
+
+tool_index: 0
+tool_2_present: false
+
+# Servo register direction confirmed from the assembled mechanism.
+servo_position_open: 1470
+servo_position_closed: 2490
+
+measurement_source:
+  closed_gap_mm:
+    value: 0.0
+    status: user_confirmed
+  max_opening_width_mm:
+    value: 95.0
+    status: user_confirmed
+    source: direct_physical_confirmation
+  grasp_center:
+    flange_forward_distance_mm: 197.0
+    flange_forward_axis: "+Z"
+    left_right_symmetric: true
+    status: user_confirmed
+    source: direct_physical_confirmation
+  single_finger_length_mm:
+    value: 130.0
+    range_mm: [125.0, 135.0]
+    status: user_confirmed
+    source: direct_physical_measurement
+    definition: mounting/base reference to fingertip contact end
+  single_fingertip_width_mm:
+    value: 11.0
+    range_mm: [10.0, 12.0]
+    status: user_confirmed
+    source: direct_physical_measurement
+    definition: lateral width of the tapered contact end
+  single_fingertip_thickness_mm:
+    value: 9.0
+    range_mm: [8.0, 10.0]
+    status: user_confirmed
+    source: direct_physical_measurement
+    definition: front-to-back thickness at the contact end
+
+measurement_uncertainty_mm: 5.0
+needs_direct_measurement:
+  []
+
+# The physical forward direction and tool orientation were confirmed on the
+# assembled hardware. Translation is expressed in the Tool 0 flange frame.
+tcp_translation_mm: [0.0, 0.0, 197.0]
+tcp_rotation_deg: [0.0, 0.0, 0.0]
+translation_physically_verified: true
+rotation_physically_verified: true
