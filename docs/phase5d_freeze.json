@@ -1,0 +1,105 @@
+{
+  "checkpoint": "Phase 5D — Episode Dataset QA + Canonical Schema",
+  "checkpoint_tag": "phase5d-checkpoint",
+  "status": "PASS_WITH_WARNINGS",
+  "base_commit": "5862c3ba4997ae0d4c41f69c73981353af3a8346",
+  "episode_id": "teleop_20260927_015239_279634825",
+  "episode_label": "cube_to_frame_002",
+  "raw_jsonl": {
+    "path": "teleop_traces/teleop_20260927_015239_279634825.jsonl",
+    "bytes": 13928676,
+    "sha256": "87bdcd6ee68bcc1edb9e2ff79a764a34d239043f918032f3ad5d83d205082e9c"
+  },
+  "raw_cameras": {
+    "front": {
+      "directory": "teleop_traces/teleop_20260927_015239_279634825/cameras/front",
+      "jpeg_count": 2185,
+      "total_bytes": 68259186,
+      "sha256_inventory": "bfd8d9e0b1b6e5f6eac15adecc62c44733e00fa6d85f98963b797fd196cb7bea"
+    },
+    "left": {
+      "directory": "teleop_traces/teleop_20260927_015239_279634825/cameras/left",
+      "jpeg_count": 2182,
+      "total_bytes": 116772848,
+      "sha256_inventory": "e2d90cf2442ceda85bcf2897c0055ab5716542b224bf1622474f33a96dea8541"
+    },
+    "right": {
+      "directory": "teleop_traces/teleop_20260927_015239_279634825/cameras/right",
+      "jpeg_count": 2177,
+      "total_bytes": 77167377,
+      "sha256_inventory": "d583e5d554fc32620498288968097c58c0a86ae7b92b9bf6b9ccd894ebdf7dd4"
+    }
+  },
+  "camera_inventory_algorithm": "SHA256 of UTF-8 lines: <file SHA256> + two spaces + episode-relative POSIX path + LF; JPEG paths sorted lexicographically per camera.",
+  "review_video": {
+    "path": "teleop_traces/teleop_20260927_015239_279634825/cube_to_frame_002_multiview.mp4",
+    "bytes": 41571148,
+    "sha256": "95ad88f3c3a27fdee705ea4021042a70bd032da901c42254eb744725ca08d352"
+  },
+  "derived_artifacts": [
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/README.md",
+      "bytes": 699,
+      "sha256": "fc544c2531713d1ca4209cf858b1facd4db1000def93cdb52f0c4b1b16c25610"
+    },
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/alignment.jsonl",
+      "bytes": 9096739,
+      "sha256": "3322b86f43eab2b3a9ea4fc2b004312cfad5f181269e7698e71664d17c988c90"
+    },
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/annotations.json",
+      "bytes": 5317,
+      "sha256": "d6904939c9c22730d6899a8edd27fd99c38ef2290888359722ad095f642ef659"
+    },
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/camera_manifest.json",
+      "bytes": 5858,
+      "sha256": "99e671f514d4d23d9d0044b7e4f3070a64c933b7a7975b2e36c3219054b773a1"
+    },
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/episode_manifest.json",
+      "bytes": 12316,
+      "sha256": "63777fad1c76d1d0fd571a93a3ec0c7610dcdd367a2ffa21e6a763773ca92afd"
+    },
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/qa_report.json",
+      "bytes": 15559,
+      "sha256": "b6a18fd018940b270d4cf5f05dff185e103db245b9e345a537291b6174c49fa6"
+    },
+    {
+      "path": "teleop_traces/teleop_20260927_015239_279634825/derived/phase5d/raw_audit.json",
+      "bytes": 19720,
+      "sha256": "53211d815b91e5ef16e18e05b86bc87b8539db29915654d53eaf145c65410147"
+    }
+  ],
+  "implementation": [
+    {
+      "path": "episode_qa.py",
+      "bytes": 49843,
+      "sha256": "aa8ff6d64f097eb35ddbcd0b60a9a830d8b6e728a010f619d2d7628e2b009e3d"
+    },
+    {
+      "path": "test_episode_qa.py",
+      "bytes": 10195,
+      "sha256": "a01fcdc2c3cc179518b29f860f6b38a6787c4c090c38edb8e8c82602e58cb8b9"
+    }
+  ],
+  "geometry_reference": {
+    "path": "gripper_geometry.yaml",
+    "bytes": 1668,
+    "sha256": "fa65d8c3be3f6be27023ad5ace49014995fdb20e8a32ae9c3e952113554344be"
+  },
+  "geometry_status": "nominal_geometry; not precision measured TCP",
+  "derived_generation_provenance": "Artifacts predate this commit: their original base HEAD and dirty-worktree metadata are preserved without rewriting. Implementation checksums above bind the exact files frozen here.",
+  "storage": "Raw JSONL/JPEG/MP4 and derived artifacts remain local, outside Git. These checksums detect changes; they are not a backup or filesystem write lock.",
+  "success_annotation": null,
+  "side_effects": {
+    "robot_connections": 0,
+    "leader_connections": 0,
+    "camera_devices_opened": 0,
+    "gripper_serial_opened": 0,
+    "motion_commands_sent": 0
+  },
+  "exit_boundary": "No training conversion, new collection, training or Astra execution authorized by this checkpoint."
+}
