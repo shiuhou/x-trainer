@@ -10,7 +10,6 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from leisaac.xtrainer_utils.third_party.feetech.scservo_sdk import (
     COMM_SUCCESS,
@@ -21,6 +20,25 @@ from leisaac.xtrainer_utils.third_party.feetech.scservo_sdk.sms_sts import (
     SMS_STS_PRESENT_POSITION_L,
     SMS_STS_TORQUE_ENABLE,
 )
+
+
+class BoundedPort(PortHandler):
+    """Use monotonic packet deadlines and bounded serial writes."""
+
+    def __init__(self, name: str, timeout_s: float):
+        super().__init__(name)
+        self.timeout_s = timeout_s
+
+    def getCurrentTime(self):
+        return time.monotonic_ns() / 1_000_000
+
+    def setPacketTimeout(self, length):
+        super().setPacketTimeout(length)
+        self.packet_timeout = min(float(self.packet_timeout), self.timeout_s * 1000)  # type: ignore[has-type]
+
+    def writePort(self, packet):
+        self.ser.write_timeout = self.timeout_s
+        return super().writePort(packet)
 
 
 @dataclass(frozen=True)
@@ -55,13 +73,14 @@ class NovaGripper:
         position_deadband: int = 2,
         input_deadband: float = 0.03,
         command_period_s: float = 0.04,
+        serial_timeout_s: float = 0.20,
     ):
         if baudrate <= 0:
             raise ValueError("Gripper baudrate must be positive")
         if not 0 <= servo_id <= 253:
             raise ValueError("Feetech servo ID must be in [0, 253]")
-        if open_position >= closed_position:
-            raise ValueError("open_position must be below closed_position")
+        if open_position == closed_position:
+            raise ValueError("open_position and closed_position must differ")
         if not 0 <= command_speed <= 4095:
             raise ValueError("Feetech command speed must be in [0, 4095]")
         if not 0 <= command_acceleration <= 255:
@@ -73,6 +92,9 @@ class NovaGripper:
         if command_period_s <= 0:
             raise ValueError("command_period_s must be positive")
 
+        if not math.isfinite(serial_timeout_s) or serial_timeout_s <= 0:
+            raise ValueError("serial_timeout_s must be positive and finite")
+        self.serial_timeout_s = serial_timeout_s
         self.port_name = port
         self.baudrate = baudrate
         self.servo_id = servo_id
@@ -83,9 +105,9 @@ class NovaGripper:
         self.position_deadband = position_deadband
         self.input_deadband = input_deadband
         self.command_period_s = command_period_s
-        self._port: Optional[PortHandler] = None
-        self._servo: Optional[sms_sts] = None
-        self._last_command_position: Optional[int] = None
+        self._port: PortHandler | None = None
+        self._servo: sms_sts | None = None
+        self._last_command_position: int | None = None
         self._last_command_time = 0.0
 
     @property
@@ -97,14 +119,12 @@ class NovaGripper:
         if self.is_open:
             return self.read_status()
 
-        port = PortHandler(self.port_name)
+        port = BoundedPort(self.port_name, self.serial_timeout_s)
         if not port.openPort():
             raise GripperProtocolError(f"Cannot open gripper port: {self.port_name}")
         if not port.setBaudRate(self.baudrate):
             port.closePort()
-            raise GripperProtocolError(
-                f"Cannot set gripper baudrate: {self.baudrate}"
-            )
+            raise GripperProtocolError(f"Cannot set gripper baudrate: {self.baudrate}")
 
         servo = sms_sts(port)
         self._port = port
@@ -177,18 +197,16 @@ class NovaGripper:
         if not math.isfinite(normalized):
             raise ValueError("Gripper normalized command must be finite")
         normalized = max(0.0, min(1.0, normalized))
-        return int(
-            round(
-                self.open_position
-                + normalized * (self.closed_position - self.open_position)
-            )
+        return round(
+            self.open_position
+            + normalized * (self.closed_position - self.open_position)
         )
 
     def command_normalized(
         self,
         normalized: float,
-        timing: Optional[dict] = None,
-    ) -> Optional[int]:
+        timing: dict | None = None,
+    ) -> int | None:
         """Command 0=open through 1=closed; returns None if rate-skipped."""
         position = self.normalized_to_position(normalized)
         now = time.monotonic()
@@ -200,16 +218,24 @@ class NovaGripper:
         self.command_position(position, timing=timing)
         return position
 
-    def command_position(self, position: int, timing: Optional[dict] = None) -> None:
+    def command_position(
+        self,
+        position: int,
+        timing: dict | None = None,
+        send_not_after_ns: int | None = None,
+    ) -> None:
         """Write one Feetech target position; torque must be enabled by caller."""
         servo = self._require_open()
-        if not self.open_position <= position <= self.closed_position:
+        low, high = sorted((self.open_position, self.closed_position))
+        if not low <= position <= high:
             raise ValueError(
-                f"Gripper position {position} outside configured range "
-                f"[{self.open_position}, {self.closed_position}]"
+                f"Gripper position {position} outside configured range [{low}, {high}]"
             )
+        send_ns = time.monotonic_ns()
+        if send_not_after_ns is not None and send_ns > send_not_after_ns:
+            raise TimeoutError("gripper send deadline missed")
         if timing is not None:
-            timing["t_gripper_send"] = time.monotonic_ns()
+            timing["t_gripper_send"] = send_ns
         result, error = servo.WritePosEx(
             self.servo_id,
             int(position),

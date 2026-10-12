@@ -1,5 +1,16 @@
 # Nova and X-Trainer Leader Teleoperation
 
+## Public runtime entrypoints
+
+The sanitized `run_teleop.py` entrypoint now requires `--execute`, a reviewed
+local `--config` and `--leader-config` for hardware use. Running without
+`--execute` is offline. Gripper connection/torque and clutch selection are
+explicit opt-ins. The historical pilot commands below describe the original
+local research runtime, not the current public CLI. See
+[Teach and Repeat](README_TEACH_REPEAT.md) for configuration, R/E recording,
+validation and single replay. Teach/Repeat has offline validation only; no
+live replay verification has been performed.
+
 ## Current field status (2026-09-27)
 
 The direct Leader-to-Nova runtime has completed a real-hardware pilot with

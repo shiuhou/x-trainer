@@ -1,0 +1,15 @@
+{
+  "port": "/dev/serial/by-id/SET_LEADER_SERIAL",
+  "baudrate": null,
+  "joint_ids": null,
+  "append_id": null,
+  "trigger_id": null,
+  "position_address": null,
+  "position_length": null,
+  "torque_address": null,
+  "offsets_rad": null,
+  "signs": null,
+  "trigger_open_deg": null,
+  "trigger_closed_deg": null,
+  "sample_hz": null
+}

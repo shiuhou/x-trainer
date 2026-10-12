@@ -4,8 +4,8 @@ import math
 import re
 import socket
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Sequence
 
 from teleop_config import NovaConfig
 
@@ -27,7 +27,7 @@ class NovaClient:
 
     def __init__(self, config: NovaConfig):
         self.config = config
-        self._socket: Optional[socket.socket] = None
+        self._socket: socket.socket | None = None
         self._receive_buffer = b""
 
     def connect(self):
@@ -57,17 +57,11 @@ class NovaClient:
             raise NovaProtocolError(f"Invalid RobotMode response: {response.raw}")
         return int(values[0])
 
-    def require_mode(self, expected: Optional[int] = None):
-        expected = (
-            self.config.required_start_mode
-            if expected is None
-            else expected
-        )
+    def require_mode(self, expected: int | None = None):
+        expected = self.config.required_start_mode if expected is None else expected
         mode = self.robot_mode()
         if mode != expected:
-            raise NovaProtocolError(
-                f"Nova RobotMode must be {expected}, got {mode}"
-            )
+            raise NovaProtocolError(f"Nova RobotMode must be {expected}, got {mode}")
 
     def get_angle(self) -> list[float]:
         response = self._request("GetAngle()")
@@ -158,10 +152,11 @@ class NovaClient:
     def servo_j(
         self,
         joints_deg: Sequence[float],
-        t: Optional[float] = None,
-        aheadtime: Optional[float] = None,
-        gain: Optional[float] = None,
-        timing: Optional[dict] = None,
+        t: float | None = None,
+        aheadtime: float | None = None,
+        gain: float | None = None,
+        timing: dict | None = None,
+        send_not_after_ns: int | None = None,
     ) -> NovaResponse:
         if len(joints_deg) != 6:
             raise ValueError("ServoJ requires six joint angles")
@@ -183,7 +178,9 @@ class NovaClient:
             + ",".join(f"{float(value):.6f}" for value in joints_deg)
             + f",t={t:g},aheadtime={aheadtime:g},gain={gain:g})"
         )
-        return self._request(command, timing=timing)
+        return self._request(
+            command, timing=timing, send_not_after_ns=send_not_after_ns
+        )
 
     def stop(self) -> NovaResponse:
         if self._socket is None:
@@ -202,17 +199,27 @@ class NovaClient:
         if response.error_id != 0:
             raise NovaProtocolError(response.raw)
 
-    def _request(self, command: str, timing: Optional[dict] = None) -> NovaResponse:
+    def _request(
+        self,
+        command: str,
+        timing: dict | None = None,
+        send_not_after_ns: int | None = None,
+    ) -> NovaResponse:
         if self._socket is None:
             raise RuntimeError("NovaClient is not connected")
         if not command or ";" in command or "\n" in command:
             raise ValueError("Invalid Nova command")
+        send_ns = time.monotonic_ns()
+        if send_not_after_ns is not None and send_ns > send_not_after_ns:
+            raise TimeoutError("ServoJ send deadline missed")
         if timing is not None:
-            timing["t_servoj_send"] = time.monotonic_ns()
+            timing["t_servoj_send"] = send_ns
         self._socket.sendall(command.encode("ascii"))
         raw = self._receive_response()
         if timing is not None:
             timing["t_servoj_response"] = time.monotonic_ns()
+        if not raw.rstrip().endswith(command + ";"):
+            raise NovaProtocolError("Dashboard response does not match request")
         match = re.match(r"\s*(-?\d+)\s*,", raw)
         if match is None:
             raise NovaProtocolError(f"Cannot parse Nova ErrorID: {raw}")
@@ -224,6 +231,7 @@ class NovaClient:
         )
 
     def _receive_response(self) -> str:
+        assert self._socket is not None
         while b";" not in self._receive_buffer:
             chunk = self._socket.recv(4096)
             if not chunk:
@@ -244,9 +252,7 @@ class NovaClient:
         try:
             return [float(value.strip()) for value in content.split(",")]
         except ValueError as exc:
-            raise NovaProtocolError(
-                f"Cannot parse Nova values: {response}"
-            ) from exc
+            raise NovaProtocolError(f"Cannot parse Nova values: {response}") from exc
 
     @classmethod
     def _parse_values(cls, response: NovaResponse) -> list[float]:

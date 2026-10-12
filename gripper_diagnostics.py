@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from nova_gripper import GripperStatus
 from teleop_config import GripperDiagnosticConfig
@@ -22,16 +21,16 @@ class GripperDiagnostic:
     closed_position: int
     config: GripperDiagnosticConfig
     state: str = "UNKNOWN"
-    _candidate_state: Optional[str] = None
-    _candidate_since: Optional[float] = None
-    _last_target_position: Optional[int] = None
-    _last_actual_position: Optional[int] = None
+    _candidate_state: str | None = None
+    _candidate_since: float | None = None
+    _last_target_position: int | None = None
+    _last_actual_position: int | None = None
 
     def update(
         self,
-        target_position: Optional[int],
-        status: Optional[GripperStatus],
-        now: Optional[float] = None,
+        target_position: int | None,
+        status: GripperStatus | None,
+        now: float | None = None,
     ) -> str:
         """Return the current diagnostic state from the latest observations."""
         now = time.monotonic() if now is None else float(now)
@@ -49,7 +48,9 @@ class GripperDiagnostic:
         )
         self._last_target_position = target
         self._last_actual_position = actual
-        error = target - actual
+        # Positive progress means closing for either configured polarity.
+        direction = 1 if self.closed_position > self.open_position else -1
+        error = (target - actual) * direction
         endpoint = self.config.endpoint_tolerance
         tracking_error = self.config.tracking_error_threshold
 
@@ -66,7 +67,9 @@ class GripperDiagnostic:
         elif error < -tracking_error:
             base_state = "OPENING"
         elif error > tracking_error:
-            high_effort = abs(int(status.current)) >= self.config.candidate_current_threshold
+            high_effort = (
+                abs(int(status.current)) >= self.config.candidate_current_threshold
+            )
             if high_effort:
                 base_state = (
                     "CLOSING_BLOCKED_CANDIDATE"

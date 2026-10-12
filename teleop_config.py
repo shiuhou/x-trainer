@@ -1,25 +1,24 @@
 """Configuration for the lightweight Nova teleoperation runtime."""
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
 
-
-JointLimits = Optional[Tuple[Tuple[float, float], ...]]
+JointLimits = tuple[tuple[float, float], ...] | None
 
 
 @dataclass(frozen=True)
 class LeaderConfig:
     port: str
     baudrate: int
-    joint_ids: Tuple[int, ...]
+    joint_ids: tuple[int, ...]
     append_id: int
     trigger_id: int
     position_address: int
     position_length: int
     torque_address: int
-    offsets_rad: Tuple[float, ...]
-    signs: Tuple[int, ...]
+    offsets_rad: tuple[float, ...]
+    signs: tuple[int, ...]
     # Measured HAND_RIGHT trigger endpoints from the 2026-09-26 trace.
     # The trigger position decreases when pressed/closed.
     trigger_open_deg: float = 205.3
@@ -29,6 +28,31 @@ class LeaderConfig:
     sample_hz: float = 150.0
 
     def __post_init__(self):
+        if not isinstance(self.port, str) or not self.port.strip():
+            raise ValueError("Leader port must be explicitly configured")
+        ids = (*self.joint_ids, self.append_id, self.trigger_id)
+        if any(type(i) is not int or not 0 <= i <= 252 for i in ids) or len(
+            set(ids)
+        ) != len(ids):
+            raise ValueError("Leader IDs must be distinct integers in [0,252]")
+        for value in (
+            self.baudrate,
+            self.position_address,
+            self.position_length,
+            self.torque_address,
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError("Leader protocol settings must be positive integers")
+        if not all(
+            math.isfinite(v)
+            for v in (
+                *self.offsets_rad,
+                self.trigger_open_deg,
+                self.trigger_closed_deg,
+                self.sample_hz,
+            )
+        ):
+            raise ValueError("Leader calibration and rate must be finite")
         if len(self.joint_ids) != 6:
             raise ValueError("Leader must contain six joint IDs")
         if len(self.offsets_rad) != len(self.joint_ids):
@@ -43,11 +67,11 @@ class LeaderConfig:
             raise ValueError("Leader trigger endpoints must differ")
 
     @property
-    def torque_ids(self) -> Tuple[int, ...]:
+    def torque_ids(self) -> tuple[int, ...]:
         return self.joint_ids + (self.append_id, self.trigger_id)
 
     @property
-    def read_ids(self) -> Tuple[int, ...]:
+    def read_ids(self) -> tuple[int, ...]:
         return self.joint_ids + (self.trigger_id,)
 
 
@@ -78,8 +102,8 @@ class GripperConfig:
             raise ValueError("Gripper baudrate must be positive")
         if not 0 <= self.servo_id <= 253:
             raise ValueError("Gripper servo ID must be in [0, 253]")
-        if self.open_position >= self.closed_position:
-            raise ValueError("Gripper open position must be below closed position")
+        if self.open_position == self.closed_position:
+            raise ValueError("Gripper endpoints must differ")
         if not 0 <= self.command_speed <= 4095:
             raise ValueError("Gripper command speed must be in [0, 4095]")
         if not 0 <= self.command_acceleration <= 255:
@@ -107,7 +131,9 @@ class GripperDiagnosticConfig:
 
     def __post_init__(self):
         if self.endpoint_tolerance < 0 or self.tracking_error_threshold < 0:
-            raise ValueError("Gripper diagnostic position thresholds must be nonnegative")
+            raise ValueError(
+                "Gripper diagnostic position thresholds must be nonnegative"
+            )
         if self.candidate_current_threshold < 0:
             raise ValueError("Gripper diagnostic current threshold must be nonnegative")
         if self.candidate_persistence_s <= 0 or self.target_change_threshold < 0:
@@ -117,14 +143,14 @@ class GripperDiagnosticConfig:
 @dataclass(frozen=True)
 class TeleopConfig:
     dt_s: float = 0.03
-    max_offset_deg: Tuple[float, ...] = (20.0, 20.0, 20.0, 20.0, 20.0, 20.0)
+    max_offset_deg: tuple[float, ...] = (20.0, 20.0, 20.0, 20.0, 20.0, 20.0)
     # Baseline traces showed a stable ~33 Hz loop and 5.8 ms ServoJ RTT.
     # The previous 15 deg/s cap caused visible intentional lag, so the
     # shoulder/elbow and wrist caps are now split for a more responsive feel.
-    max_speed_deg_s: Tuple[float, ...] = (30.0, 30.0, 30.0, 40.0, 40.0, 40.0)
-    map_sign: Tuple[int, ...] = (1, -1, -1, 1, -1, 1)
-    scale: Tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
-    deadband_deg: Tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    max_speed_deg_s: tuple[float, ...] = (30.0, 30.0, 30.0, 40.0, 40.0, 40.0)
+    map_sign: tuple[int, ...] = (1, -1, -1, 1, -1, 1)
+    scale: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    deadband_deg: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     joint_limits_deg: JointLimits = None
     stale_timeout_s: float = 0.20
     servo_t: float = 0.1
@@ -132,9 +158,24 @@ class TeleopConfig:
     servo_gain: float = 500.0
     # Upstream X-Trainer key packet is (A, B, sensor). None disables clutch
     # until a physical button has been verified by the operator.
-    clutch_key: Optional[str] = None
+    clutch_key: str | None = None
 
     def __post_init__(self):
+        if not all(
+            math.isfinite(v)
+            for v in (
+                *self.max_offset_deg,
+                *self.max_speed_deg_s,
+                *self.scale,
+                *self.deadband_deg,
+                self.dt_s,
+                self.stale_timeout_s,
+                self.servo_t,
+                self.servo_aheadtime,
+                self.servo_gain,
+            )
+        ):
+            raise ValueError("Teleop parameters must be finite")
         lengths = {
             len(self.max_offset_deg),
             len(self.max_speed_deg_s),
@@ -171,10 +212,7 @@ class TeleopConfig:
 
 
 DEFAULT_LEADER_CONFIG = LeaderConfig(
-    port=(
-        "/dev/serial/by-id/"
-        "SET_LEADER_RIGHT_SERIAL"
-    ),
+    port=("/dev/serial/by-id/SET_LEADER_RIGHT_SERIAL"),
     baudrate=2_000_000,
     joint_ids=(11, 12, 14, 15, 16, 17),
     append_id=13,

@@ -17,6 +17,13 @@ For a deeper technical overview (architecture, modules, algorithms), see `docs/T
 
 ---
 
+## Nova Teach and Repeat
+
+The standalone Nova runtime can record a new demonstration with terminal R/E
+and replay its original arm/gripper commands once. Replay defaults to an
+offline validation/preview; live use requires explicit local configuration
+and operator confirmation. See [Teach and Repeat](README_TEACH_REPEAT.md).
+
 ## Features
 
 * **Dual-Arm Simulation Environment**: Full URDF import of the X-Trainer robot with tuned physical collision and dynamic parameters.

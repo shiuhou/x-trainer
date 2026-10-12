@@ -76,3 +76,9 @@ checkpoints/*
 !checkpoints/.gitkeep
 
 Code Submission Guidelines.md
+
+# Teach/Repeat private configuration and runtime evidence
+teach_episodes/
+repeat_reports/
+*.local.json
+.venv-teach/
