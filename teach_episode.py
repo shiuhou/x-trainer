@@ -224,25 +224,34 @@ class Episode:
         config.compatible(self.header["profile"])
         c = config.checks
         previous = self.initial.target_deg
-        previous_ns = self.header["start_ns"]
         for state in [self.initial, *self.observations, self.final]:
             state.fresh(config)
         for event in self.events:
             if event["kind"] == "arm":
                 target = vector(event["joints_deg"], "target")
                 config.joints_in_range(target)
-                dt = (event["send_ns"] - previous_ns) / 1e9
-                if dt <= 0:
-                    if target != previous:
-                        raise TeachError("changed arm target has no elapsed time")
-                elif any(
-                    abs(a - b) > speed * dt + 1e-6
-                    for a, b, speed in zip(
-                        target, previous, config.data["limits"]["max_speed_deg_s"]
+                # ``send_ns`` measures transport scheduling, not the motion
+                # represented by a ServoJ command.  A short network interval
+                # can be smaller than the command's point time (and includes
+                # reply/loop jitter), which would falsely reject a faithfully
+                # recorded target update.  Check the requested average target
+                # rate against the ServoJ ``t`` preserved in the episode.
+                duration_s = event["t"]
+                for index, (value, old, speed) in enumerate(
+                    zip(
+                        target,
+                        previous,
+                        config.data["limits"]["max_speed_deg_s"],
                     )
                 ):
-                    raise TeachError("recorded arm speed exceeds current limits")
-                previous, previous_ns = target, event["send_ns"]
+                    requested_speed = abs(value - old) / duration_s
+                    if requested_speed > speed + 1e-6:
+                        raise TeachError(
+                            "recorded arm speed exceeds current limits: "
+                            f"J{index + 1} {requested_speed:.3f} > "
+                            f"{speed:.3f} deg/s"
+                        )
+                previous = target
             else:
                 low, high = sorted(
                     (config.gripper["open_position"], config.gripper["closed_position"])

@@ -323,6 +323,11 @@ def test_profile_mismatch_and_speed_limits(tmp_path, config):
     with pytest.raises(TeachError, match="gripper"):
         load_episode(path, RepeatConfig.parse(raw))
     raw = config_data()
+    raw["limits"]["max_speed_deg_s"] = [5] * 6
+    # The command point time is 100 ms.  Its 0.3 degree target change is
+    # 3 deg/s even though the transport sends the command after 30 ms.
+    assert load_episode(path, RepeatConfig.parse(raw)).events
+    raw = config_data()
     raw["limits"]["max_speed_deg_s"] = [1] * 6
     with pytest.raises(TeachError, match="speed"):
         load_episode(path, RepeatConfig.parse(raw))
