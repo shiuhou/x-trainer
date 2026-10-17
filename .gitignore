@@ -82,3 +82,6 @@ teach_episodes/
 repeat_reports/
 *.local.json
 .venv-teach/
+teleop_config.local.py
+.agents/*
+!.agents/docs/

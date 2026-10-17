@@ -5,21 +5,18 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from episode_recorder import CameraRecorder, CameraSpec
 from nova_client import NovaClient
 from nova_realtime import NovaRealtimeReader
-from teach_config import RepeatConfig, TeachError, read_json
+from teach_config import RepeatConfig, TeachError, load_settings
 from teach_controls import TeachSession, TerminalKeys
-from teach_episode import RobotState
 from teleop_config import (
     DEFAULT_GRIPPER_DIAGNOSTIC_CONFIG,
     DEFAULT_TELEOP_CONFIG,
-    LeaderConfig,
-    NovaConfig,
 )
 from teleop_controller import TeleopController
 from teleop_telemetry import TelemetryWriter, make_trace_path
@@ -40,8 +37,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--execute", action="store_true", help="explicitly allow hardware teleoperation"
     )
-    parser.add_argument("--config", type=Path, help="local Teach/Repeat configuration")
-    parser.add_argument("--leader-config", type=Path, help="local LeaderConfig JSON")
+    parser.add_argument("--settings", type=Path, help="existing local teleop_config.py")
     parser.add_argument("--teach-dir", type=Path, help="enable R/E episode recording")
     vector = ("J1", "J2", "J3", "J4", "J5", "J6")
     parser.add_argument(
@@ -198,7 +194,7 @@ def parse_camera_specs(args) -> list[CameraSpec]:
     return specs
 
 
-def make_teleop_config(args):
+def make_teleop_config(args, base=DEFAULT_TELEOP_CONFIG):
     values: dict[str, Any] = {
         "clutch_key": None if args.clutch_key == "none" else args.clutch_key,
     }
@@ -222,7 +218,7 @@ def make_teleop_config(args):
         values["servo_aheadtime"] = args.servo_aheadtime
     if args.servo_gain is not None:
         values["servo_gain"] = args.servo_gain
-    return replace(DEFAULT_TELEOP_CONFIG, **values)
+    return replace(base, **values)
 
 
 def clutch_state(sample, clutch_key):
@@ -240,51 +236,27 @@ def clutch_state(sample, clutch_key):
 def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     camera_specs = parse_camera_specs(args)
-    teleop_config = make_teleop_config(args)
+    settings = load_settings(args.settings)
+    teleop_config = make_teleop_config(args, settings.DEFAULT_TELEOP_CONFIG)
     if not args.execute:
         print(
-            "Offline options validated. Hardware requires --execute --config --leader-config."
+            "Offline options validated. Hardware requires --execute and configured teleop settings."
         )
         return 0
-    if not args.config or not args.leader_config:
-        raise TeachError("--execute requires --config and --leader-config")
     if not sys.stdin.isatty():
         raise TeachError("--execute requires an interactive terminal")
-    local_config = RepeatConfig.load(args.config)
-    leader_values = read_json(args.leader_config)
-    if not isinstance(leader_values, dict) or set(leader_values) != set(
-        LeaderConfig.__dataclass_fields__
-    ):
-        raise TeachError(
-            "Leader config must explicitly contain every LeaderConfig field"
-        )
-    for field in ("joint_ids", "offsets_rad", "signs"):
-        if not isinstance(leader_values[field], list):
-            raise TeachError(f"Leader {field} must be a JSON array")
-        leader_values[field] = tuple(leader_values[field])
-    leader_config = LeaderConfig(**leader_values)
-    if not leader_config.port or "SET_" in leader_config.port:
-        raise TeachError("Leader port must be explicitly configured")
-    n = local_config.data["nova"]
-    nova_config = NovaConfig(
-        ip=n["host"],
-        dashboard_port=n["dashboard_port"],
-        socket_timeout_s=n["socket_timeout_s"],
-        stop_timeout_s=n["stop_timeout_s"],
+    nova_config = settings.DEFAULT_NOVA_CONFIG
+    leader_config = settings.DEFAULT_LEADER_CONFIG
+    local_config = RepeatConfig.from_teleop(
+        nova_config,
+        settings.DEFAULT_GRIPPER_CONFIG,
+        teleop_config,
+        getattr(settings, "REPEAT_CHECKS", None),
     )
-    if any(
-        a > b
-        for a, b in zip(
-            teleop_config.max_speed_deg_s,
-            local_config.data["limits"]["max_speed_deg_s"],
-        )
-    ):
-        raise TeachError(
-            "teleop speed cap exceeds local configuration; set --max-speed explicitly"
-        )
-    gripper_config = local_config.gripper
-    gripper_config.pop("model_number")
-    gripper_config["input_deadband"] = 0.03
+    if not leader_config.port or "SET_" in leader_config.port:
+        raise TeachError("Set the Leader port in your existing teleop_config.py")
+    n = local_config.data["nova"]
+    gripper_config = asdict(settings.DEFAULT_GRIPPER_CONFIG)
     from gripper_diagnostics import GripperDiagnostic
     from leader_reader import LeaderReader
     from nova_gripper import NovaGripper
@@ -316,8 +288,6 @@ def run(argv: list[str] | None = None) -> int:
         leader.open()
         if gripper is not None:
             gripper_status = gripper.open()
-            if gripper_status.model_number != local_config.gripper["model_number"]:
-                raise TeachError("gripper model does not match local config")
             print(
                 "Gripper detected: "
                 f"ID={gripper_status.servo_id} "
@@ -536,44 +506,14 @@ def run(argv: list[str] | None = None) -> int:
 
             if teach is not None:
                 assert gripper is not None and keys is not None
-                if (
-                    last_gripper_status is None
-                    or last_gripper_feedback_ns is None
-                    or time.monotonic_ns() - last_gripper_feedback_ns
-                    > local_config.checks["gripper_feedback_timeout_s"] * 1e9 / 3
-                ):
-                    last_gripper_status = gripper.read_status()
-                    last_gripper_feedback_ns = time.monotonic_ns()
-                    last_gripper_feedback = time.monotonic()
-                if (
-                    last_gripper_status.model_number
-                    != local_config.gripper["model_number"]
-                ):
-                    raise TeachError("gripper identity changed")
-                assert last_gripper_feedback_ns is not None
                 assert controller.commanded_deg is not None
-                # Re-read arm cache after the serial query so state freshness is honest.
-                feedback_sample = feedback.latest(
-                    local_config.checks["feedback_timeout_s"]
-                )
-                state = RobotState(
-                    time.monotonic_ns(),
-                    feedback_sample.host_timestamp_ns,
-                    list(feedback_sample.q_actual_deg),
-                    list(feedback_sample.q_target_deg),
-                    feedback_sample.robot_mode,
-                    last_gripper_feedback_ns,
-                    last_gripper_status.position,
-                    last_gripper_status.moving,
-                    last_gripper_status.torque_enabled,
-                )
-                for message in teach.boundary(
-                    keys.poll(),
-                    state,
+                teach.poll_hardware(
+                    keys,
+                    feedback,
+                    gripper,
                     list(controller.commanded_deg),
                     last_gripper_target_position,
-                ):
-                    print(message)
+                )
 
             observed_clutch = clutch_state(sample, teleop_config.clutch_key)
             if teleop_config.clutch_key is not None:
@@ -625,21 +565,8 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"ServoJ rejected: {response.raw}")
 
             if teach is not None:
-                # Record the rounded values actually serialized by NovaClient.
-                sent_joints = [float(f"{v:.6f}") for v in output.commanded_deg]
-                teach.command(
-                    {
-                        "kind": "arm",
-                        "send_ns": servo_timing["t_servoj_send"],
-                        "reply_ns": servo_timing["t_servoj_response"],
-                        "error_id": response.error_id,
-                        "reply": response.raw,
-                        "command": response.command,
-                        "joints_deg": sent_joints,
-                        "t": float(f"{teleop_config.servo_t:g}"),
-                        "aheadtime": float(f"{teleop_config.servo_aheadtime:g}"),
-                        "gain": float(f"{teleop_config.servo_gain:g}"),
-                    }
+                teach.arm_command(
+                    output.commanded_deg, teleop_config, response, servo_timing
                 )
             if response.error_id != 0:
                 break
@@ -665,21 +592,8 @@ def run(argv: list[str] | None = None) -> int:
                             last_gripper_target_position = gripper_target_position
                             diagnostic_target = gripper_target_position
                             if teach is not None:
-                                teach.command(
-                                    {
-                                        "kind": "gripper",
-                                        "send_ns": gripper_timing["t_gripper_send"],
-                                        "reply_ns": gripper_timing[
-                                            "t_gripper_response"
-                                        ],
-                                        "error_id": 0,
-                                        "reply": "COMM_SUCCESS",
-                                        "position": gripper_target_position,
-                                        "speed": gripper_config["command_speed"],
-                                        "acceleration": gripper_config[
-                                            "command_acceleration"
-                                        ],
-                                    }
+                                teach.gripper_command(
+                                    gripper_target_position, gripper_timing
                                 )
                 if time.monotonic() - last_gripper_feedback >= 0.20:
                     try:

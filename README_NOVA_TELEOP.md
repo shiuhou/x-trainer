@@ -3,7 +3,7 @@
 ## Public runtime entrypoints
 
 The sanitized `run_teleop.py` entrypoint now requires `--execute`, a reviewed
-local `--config` and `--leader-config` for hardware use. Running without
+local `teleop_config.py` settings (`--settings FILE`) for hardware use. Running without
 `--execute` is offline. Gripper connection/torque and clutch selection are
 explicit opt-ins. The historical pilot commands below describe the original
 local research runtime, not the current public CLI. See

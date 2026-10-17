@@ -20,12 +20,6 @@ from teach_episode import EpisodeWriter, RobotState, StationaryWindow, load_epis
 
 def config_data():
     return {
-        "identity": {
-            "robot_id": "fixture-robot",
-            "model": "fixture",
-            "firmware": "fixture",
-            "calibration_id": "fixture-calibration",
-        },
         "nova": {
             "host": "fixture",
             "dashboard_port": 29999,
@@ -37,7 +31,6 @@ def config_data():
             "port": "fixture",
             "baudrate": 115200,
             "servo_id": 1,
-            "model_number": 42,
             "open_position": 2490,
             "closed_position": 1470,
             "command_speed": 500,
@@ -112,7 +105,7 @@ def make_episode(path, config):
         path,
         {
             "record_type": "teach_metadata",
-            "schema_version": 1,
+            "schema_version": 2,
             "start_ns": start,
             "initial_state": asdict(state(start)),
             "profile": config.profile(),
@@ -308,7 +301,7 @@ def test_late_monitor_aborts_before_send(tmp_path, config):
         lambda r: r[2].__setitem__("send_ns", r[1]["send_ns"]),
         lambda r: r[1].__setitem__("error_id", 1),
         lambda r: r[-1].__setitem__("records", 1),
-        lambda r: r[0].__setitem__("schema_version", 2),
+        lambda r: r[0].__setitem__("schema_version", 1),
         lambda r: r[1].__setitem__("command", "PowerOn()"),
     ],
 )
@@ -326,8 +319,8 @@ def test_profile_mismatch_and_speed_limits(tmp_path, config):
     path = tmp_path / "episode.jsonl"
     make_episode(path, config)
     raw = config_data()
-    raw["identity"]["calibration_id"] = "different"
-    with pytest.raises(TeachError, match="identity"):
+    raw["gripper"]["open_position"] = 2491
+    with pytest.raises(TeachError, match="gripper"):
         load_episode(path, RepeatConfig.parse(raw))
     raw = config_data()
     raw["limits"]["max_speed_deg_s"] = [1] * 6
@@ -344,8 +337,9 @@ def test_default_cli_zero_hardware(tmp_path, config, monkeypatch):
 
     monkeypatch.setattr(socket, "socket", denied)
     monkeypatch.setattr(socket, "create_connection", denied)
+    hardware_before = sys.modules.get("repeat_hardware")
     assert run([str(path)]) == 0
-    assert "repeat_hardware" not in sys.modules
+    assert sys.modules.get("repeat_hardware") is hardware_before
     assert run([str(path), "--execute"]) == 1
 
 

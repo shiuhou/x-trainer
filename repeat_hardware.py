@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import asdict
 from typing import Any
 
 from nova_client import NovaClient
@@ -14,12 +13,6 @@ from repeat_runtime import SendResult
 from teach_config import RepeatConfig, TeachError
 from teach_episode import RobotState
 from teleop_config import NovaConfig
-
-
-def gripper_client(config: RepeatConfig) -> NovaGripper:
-    values = config.gripper
-    values.pop("model_number")
-    return NovaGripper(**values)
 
 
 class GripperFeedback:
@@ -44,10 +37,7 @@ class GripperFeedback:
             while not self.stopping.is_set():
                 with self.lock:
                     status = self.gripper.read_status()
-                    if (
-                        status.model_number != self.config.gripper["model_number"]
-                        or status.servo_id != self.config.gripper["servo_id"]
-                    ):
+                    if status.servo_id != self.config.gripper["servo_id"]:
                         raise TeachError("gripper identity differs from configuration")
                     self.latest = (status, time.monotonic_ns())
                 self.stopping.wait(period)
@@ -84,20 +74,23 @@ class HardwareTransport:
         self.feedback = NovaRealtimeReader(
             n["host"], n["feedback_port"], n["socket_timeout_s"]
         )
-        self.gripper = gripper_client(config)
+        self.gripper = NovaGripper(**config.gripper)
         self.gripper_feedback = GripperFeedback(self.gripper, config)
 
-    def open(self) -> None:
+    def open(self, *, enable_gripper_torque: bool = False) -> None:
         self.nova.connect()
         self.nova.require_mode(5)
         status = self.gripper.open()
-        if (
-            status.model_number != self.config.gripper["model_number"]
-            or status.servo_id != self.config.gripper["servo_id"]
-        ):
+        if status.servo_id != self.config.gripper["servo_id"]:
             raise TeachError("gripper identity differs from configuration")
         if not status.torque_enabled:
-            raise TeachError("gripper torque must already be enabled")
+            if not enable_gripper_torque:
+                raise TeachError(
+                    "Gripper torque is off; explicitly use --gripper-enable-torque"
+                )
+            self.gripper.enable_torque()
+            if not self.gripper.read_status().torque_enabled:
+                raise TeachError("gripper torque did not enable")
         self.feedback.connect()
         self.feedback.start()
         self.gripper_feedback.start()
@@ -171,6 +164,3 @@ class HardwareTransport:
             if not self.gripper_feedback.thread.is_alive():
                 self.gripper.close()
             self.nova.close()
-
-    def initial_description(self) -> dict[str, Any]:
-        return asdict(self.snapshot())

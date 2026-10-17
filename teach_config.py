@@ -1,11 +1,13 @@
-"""Explicit local Teach/Repeat configuration; no hardware imports or defaults."""
+"""Reuse existing teleop settings; validate episodes without hardware imports."""
 
 from __future__ import annotations
 
-import json
+import importlib.util
 import math
-from dataclasses import dataclass
+import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 
@@ -41,29 +43,31 @@ def object_keys(value: Any, name: str, keys: set[str]) -> dict[str, Any]:
     return dict(value)
 
 
-def read_json(path: Path) -> Any:
-    def duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise TeachError(f"duplicate JSON key: {key}")
-            result[key] = value
-        return result
+def load_settings(path: Path | None = None) -> ModuleType:
+    """Load a trusted local teleop_config.py, never import a hardware driver."""
+    if path is None:
+        local = Path(__file__).with_name("teleop_config.local.py")
+        if not local.exists():
+            import teleop_config
 
+            return teleop_config
+        path = local
+    spec = importlib.util.spec_from_file_location("_teach_local_settings", path)
+    if spec is None or spec.loader is None:
+        raise TeachError(f"Cannot load settings: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve their defining module.
     try:
-        return json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=duplicate_pairs
-        )
+        spec.loader.exec_module(module)
     except (OSError, ValueError) as exc:
-        raise TeachError(f"Cannot load {path}: {exc}") from exc
+        raise TeachError(f"Cannot load settings {path}: {exc}") from exc
+    return module
 
 
-IDENTITY_KEYS = {"robot_id", "model", "firmware", "calibration_id"}
 GRIPPER_KEYS = {
     "port",
     "baudrate",
     "servo_id",
-    "model_number",
     "open_position",
     "closed_position",
     "command_speed",
@@ -91,18 +95,73 @@ class RepeatConfig:
     data: dict[str, Any]
 
     @classmethod
-    def load(cls, path: Path) -> RepeatConfig:
-        return cls.parse(read_json(path))
+    def from_teleop(
+        cls,
+        nova: Any,
+        gripper: Any,
+        teleop: Any,
+        checks: dict[str, Any] | None = None,
+    ) -> RepeatConfig:
+        """Reuse connection, raw gripper commands and limits from working teleop.
+
+        Checks are software abort thresholds, not a robot safety envelope.
+        Override individual values with REPEAT_CHECKS in the same settings file.
+        """
+        thresholds = {
+            "joint_start_tolerance_deg": [2.0] * 6,
+            "joint_tracking_tolerance_deg": [10.0] * 6,
+            "gripper_start_tolerance": 30,
+            # A grasp can stop short of the commanded endpoint. Compare actual
+            # demonstrated start/end positions separately from command tracking.
+            "gripper_tracking_tolerance": abs(
+                gripper.closed_position - gripper.open_position
+            ),
+            "feedback_timeout_s": teleop.stale_timeout_s,
+            "gripper_feedback_timeout_s": 0.3,
+            "stationary_window_s": 0.3,
+            "stationary_joint_tolerance_deg": 0.2,
+            "stationary_gripper_tolerance": 5,
+            "monitor_period_s": 0.01,
+            "max_lateness_s": 0.01,
+            "completion_timeout_s": 5.0,
+        }
+        if checks is not None:
+            if not isinstance(checks, dict) or set(checks) - CHECK_KEYS:
+                raise TeachError("REPEAT_CHECKS contains unknown check names")
+            thresholds.update(checks)
+        g = asdict(gripper)
+        return cls.parse(
+            {
+                "nova": {
+                    "host": nova.ip,
+                    "dashboard_port": nova.dashboard_port,
+                    "feedback_port": 30004,
+                    "socket_timeout_s": nova.socket_timeout_s,
+                    "stop_timeout_s": nova.stop_timeout_s,
+                },
+                "gripper": {
+                    **{k: v for k, v in g.items() if k in GRIPPER_KEYS},
+                    "serial_timeout_s": g.get(
+                        "serial_timeout_s", nova.socket_timeout_s
+                    ),
+                },
+                "limits": {
+                    "joint_limits_deg": (
+                        [list(pair) for pair in teleop.joint_limits_deg]
+                        if teleop.joint_limits_deg is not None
+                        else None
+                    ),
+                    "max_speed_deg_s": list(teleop.max_speed_deg_s),
+                },
+                "checks": thresholds,
+            }
+        )
 
     @classmethod
     def parse(cls, raw: Any) -> RepeatConfig:
         data = object_keys(
-            raw, "configuration", {"identity", "nova", "gripper", "limits", "checks"}
+            raw, "configuration", {"nova", "gripper", "limits", "checks"}
         )
-        identity = object_keys(data["identity"], "identity", IDENTITY_KEYS)
-        for key, value in identity.items():
-            if not isinstance(value, str) or not value.strip() or "SET_" in value:
-                raise TeachError(f"identity.{key} must be explicitly configured")
         nova = object_keys(
             data["nova"],
             "nova",
@@ -133,7 +192,6 @@ class RepeatConfig:
             raise TeachError("gripper.port must be explicitly configured")
         integer(gripper["baudrate"], "baudrate", 1)
         integer(gripper["servo_id"], "servo_id", 0, 253)
-        integer(gripper["model_number"], "model_number", 1)
         for key in ("open_position", "closed_position"):
             integer(gripper[key], key, 0, 4095)
         if gripper["open_position"] == gripper["closed_position"]:
@@ -145,9 +203,9 @@ class RepeatConfig:
             data["limits"], "limits", {"joint_limits_deg", "max_speed_deg_s"}
         )
         pairs = limits["joint_limits_deg"]
-        if not isinstance(pairs, list) or len(pairs) != 6:
+        if pairs is not None and (not isinstance(pairs, list) or len(pairs) != 6):
             raise TeachError("joint_limits_deg requires six lower/upper pairs")
-        for pair in pairs:
+        for pair in pairs or []:
             if (
                 not isinstance(pair, list)
                 or len(pair) != 2
@@ -185,9 +243,8 @@ class RepeatConfig:
         return dict(self.data["gripper"])
 
     def profile(self) -> dict[str, Any]:
-        """Store calibration/settings, never local endpoints or credentials."""
+        """Store raw command settings, never local endpoints or credentials."""
         return {
-            "identity": self.data["identity"],
             "gripper": {
                 k: v
                 for k, v in self.gripper.items()
@@ -199,7 +256,7 @@ class RepeatConfig:
 
     @classmethod
     def from_profile(cls, profile: Any) -> RepeatConfig:
-        p = object_keys(profile, "profile", {"identity", "gripper", "limits", "checks"})
+        p = object_keys(profile, "profile", {"gripper", "limits", "checks"})
         g = object_keys(
             p["gripper"], "profile.gripper", GRIPPER_KEYS - {"port", "serial_timeout_s"}
         )
@@ -219,11 +276,14 @@ class RepeatConfig:
 
     def compatible(self, profile: dict[str, Any]) -> None:
         recorded = self.from_profile(profile).profile()
-        for key in ("identity", "gripper"):
-            if self.profile()[key] != recorded[key]:
-                raise TeachError(f"recorded {key} does not match current configuration")
+        if self.profile()["gripper"] != recorded["gripper"]:
+            raise TeachError("recorded gripper does not match current configuration")
 
     def joints_in_range(self, joints: list[float]) -> None:
-        for value, (low, high) in zip(joints, self.data["limits"]["joint_limits_deg"]):
+        vector(joints, "joints")
+        limits = self.data["limits"]["joint_limits_deg"]
+        if limits is None:
+            return  # Preserve teleop's unspecified limits; never invent model limits.
+        for value, (low, high) in zip(joints, limits):
             if not low <= value <= high:
                 raise TeachError("joint target outside configured limits")

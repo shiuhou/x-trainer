@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from repeat_runtime import RepeatRunner
-from teach_config import RepeatConfig, TeachError
+from teach_config import RepeatConfig, TeachError, load_settings
 from teach_episode import load_episode
 
 
@@ -17,11 +17,31 @@ def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("episode", type=Path)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--config", type=Path)
+    parser.add_argument("--settings", type=Path, help="existing local teleop_config.py")
+    parser.add_argument(
+        "--gripper-enable-torque",
+        action="store_true",
+        help="explicitly enable gripper torque during live preflight if off",
+    )
+    parser.add_argument(
+        "--preview-events", type=int, default=10, help="maximum offline event rows"
+    )
     parser.add_argument("--report-dir", type=Path, default=Path("repeat_reports"))
     args = parser.parse_args(argv)
     try:
-        config = RepeatConfig.load(args.config) if args.config else None
+        if args.preview_events < 0:
+            raise TeachError("--preview-events must be nonnegative")
+        if args.gripper_enable_torque and not args.execute:
+            raise TeachError("--gripper-enable-torque requires --execute")
+        config = None
+        if args.execute or args.settings:
+            settings = load_settings(args.settings)
+            config = RepeatConfig.from_teleop(
+                settings.DEFAULT_NOVA_CONFIG,
+                settings.DEFAULT_GRIPPER_CONFIG,
+                settings.DEFAULT_TELEOP_CONFIG,
+                getattr(settings, "REPEAT_CHECKS", None),
+            )
         episode = load_episode(args.episode, config)
         print(
             json.dumps(
@@ -38,7 +58,7 @@ def run(argv: list[str] | None = None) -> int:
         )
         if not args.execute:
             # Offline time/event table; no transport construction or hardware imports.
-            for event in episode.events:
+            for event in episode.events[: args.preview_events]:
                 print(
                     json.dumps(
                         {
@@ -50,9 +70,12 @@ def run(argv: list[str] | None = None) -> int:
                         }
                     )
                 )
+            if len(episode.events) > args.preview_events:
+                print(
+                    f"... {len(episode.events) - args.preview_events} further commands validated"
+                )
             return 0
-        if config is None:
-            raise TeachError("--execute requires --config LOCAL_CONFIG")
+        assert config is not None
         if not sys.stdin.isatty():
             raise TeachError("--execute requires an interactive terminal")
         args.report_dir.mkdir(parents=True, exist_ok=True)
@@ -72,9 +95,9 @@ def run(argv: list[str] | None = None) -> int:
                 transport = HardwareTransport(config)
                 runner = RepeatRunner(episode, config, transport)
                 report = runner.report
-                transport.open()
+                transport.open(enable_gripper_torque=args.gripper_enable_torque)
                 runner.require_start()
-                print(f"Configured robot/calibration: {config.data['identity']}")
+                print("Using your existing teleop connection and gripper settings.")
                 print(
                     "Start verified. Restore objects, clear the work area, keep E-stop reachable."
                 )

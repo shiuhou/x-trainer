@@ -21,8 +21,8 @@ For a deeper technical overview (architecture, modules, algorithms), see `docs/T
 
 The standalone Nova runtime can record a new demonstration with terminal R/E
 and replay its original arm/gripper commands once. Replay defaults to an
-offline validation/preview; live use requires explicit local configuration
-and operator confirmation. See [Teach and Repeat](README_TEACH_REPEAT.md).
+offline validation/preview; live use reuses the working `teleop_config.py`
+and requires operator confirmation. See [Teach and Repeat](README_TEACH_REPEAT.md).
 
 ## Features
 

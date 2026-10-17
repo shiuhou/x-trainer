@@ -336,10 +336,10 @@ def load_episode(path: Path, config: RepeatConfig | None = None) -> Episode:
         if (
             header["record_type"] != "teach_metadata"
             or type(header["schema_version"]) is not int
-            or header["schema_version"] != 1
+            or header["schema_version"] != 2
         ):
             raise TeachError(
-                "not a Teach/Repeat v1 episode; legacy traces are not executable"
+                "not a Teach/Repeat schema 2 episode; record a new demonstration"
             )
         start = integer(header["start_ns"], "start_ns")
         recorded = RepeatConfig.from_profile(header["profile"])

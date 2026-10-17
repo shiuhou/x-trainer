@@ -59,6 +59,8 @@ class TeachSession:
         self.writers: list[EpisodeWriter] = []
         self.status = "待錄製"
         self.last_gripper_target: int | None = None
+        self.gripper_status: Any = None
+        self.gripper_feedback_ns: int | None = None
 
     @property
     def active(self) -> bool:
@@ -108,7 +110,7 @@ class TeachSession:
                     )
                     header = {
                         "record_type": "teach_metadata",
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "start_ns": state.time_ns,
                         "profile": self.config.profile(),
                         "initial_state": asdict(state),
@@ -128,6 +130,81 @@ class TeachSession:
             except TeachError as exc:
                 messages.append(f"{key.upper()} 未接受: {exc}")
         return messages
+
+    def poll_hardware(
+        self,
+        keys: TerminalKeys,
+        feedback: Any,
+        gripper: Any,
+        arm_target: list[float],
+        gripper_target: int | None,
+    ) -> None:
+        """Sample feedback and apply R/E once at the control-cycle boundary."""
+        if (
+            self.gripper_feedback_ns is None
+            or time.monotonic_ns() - self.gripper_feedback_ns
+            > self.config.checks["gripper_feedback_timeout_s"] * 1e9 / 3
+        ):
+            self.gripper_status = gripper.read_status()
+            self.gripper_feedback_ns = time.monotonic_ns()
+        if self.gripper_status.servo_id != self.config.gripper["servo_id"]:
+            raise TeachError("gripper ID changed")
+        # Refresh arm cache after the serial read; it can have blocked.
+        arm = feedback.latest(self.config.checks["feedback_timeout_s"])
+        if arm is None:
+            raise TeachError("Nova feedback stale")
+        assert self.gripper_feedback_ns is not None
+        state = RobotState(
+            time.monotonic_ns(),
+            arm.host_timestamp_ns,
+            list(arm.q_actual_deg),
+            list(arm.q_target_deg),
+            arm.robot_mode,
+            self.gripper_feedback_ns,
+            self.gripper_status.position,
+            self.gripper_status.moving,
+            self.gripper_status.torque_enabled,
+        )
+        for message in self.boundary(keys.poll(), state, arm_target, gripper_target):
+            print(message)
+
+    def arm_command(
+        self,
+        joints: Any,
+        servo: Any,
+        response: Any,
+        timing: dict[str, Any],
+    ) -> None:
+        """Record exactly the values serialized by the existing NovaClient."""
+        self.command(
+            {
+                "kind": "arm",
+                "send_ns": timing["t_servoj_send"],
+                "reply_ns": timing["t_servoj_response"],
+                "error_id": response.error_id,
+                "reply": response.raw,
+                "command": response.command,
+                "joints_deg": [float(f"{v:.6f}") for v in joints],
+                "t": float(f"{servo.servo_t:g}"),
+                "aheadtime": float(f"{servo.servo_aheadtime:g}"),
+                "gain": float(f"{servo.servo_gain:g}"),
+            }
+        )
+
+    def gripper_command(self, position: int, timing: dict[str, Any]) -> None:
+        """Call only after a successful physical position write (never a hold)."""
+        self.command(
+            {
+                "kind": "gripper",
+                "send_ns": timing["t_gripper_send"],
+                "reply_ns": timing["t_gripper_response"],
+                "error_id": 0,
+                "reply": "COMM_SUCCESS",
+                "position": position,
+                "speed": self.config.gripper["command_speed"],
+                "acceleration": self.config.gripper["command_acceleration"],
+            }
+        )
 
     def command(self, event: dict[str, Any]) -> None:
         if self.active:

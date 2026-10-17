@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import socket
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
 from nova_client import NovaClient, NovaProtocolError
-from teach_config import RepeatConfig
 from teach_episode import load_episode
 from teleop_config import NovaConfig
 from test_teach_repeat import FakeClock, config_data
@@ -92,8 +91,10 @@ def test_teleop_r_e_records_actual_writes_and_keeps_running(tmp_path, monkeypatc
         monotonic_ns=clock.now_ns,
         time_ns=clock.now_ns,
         sleep=clock.sleep,
+        strftime=lambda _: "fixture",
     )
     monkeypatch.setattr(rt, "time", time)
+    monkeypatch.setattr("teach_controls.time", time)
     monkeypatch.setattr(
         rt, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
     )
@@ -276,35 +277,21 @@ def test_teleop_r_e_records_actual_writes_and_keeps_running(tmp_path, monkeypatc
     monkeypatch.setattr(rt, "TelemetryWriter", Telemetry)
     monkeypatch.setattr(rt, "make_trace_path", lambda: str(tmp_path / "trace.jsonl"))
     monkeypatch.setattr("builtins.input", lambda: "")
-    config_path = tmp_path / "repeat.local.json"
-    config_path.write_text(json.dumps(config_data()))
-    leader_path = tmp_path / "leader.local.json"
-    leader_path.write_text(
-        json.dumps(
-            {
-                "port": "fixture",
-                "baudrate": 2000000,
-                "joint_ids": [11, 12, 14, 15, 16, 17],
-                "append_id": 13,
-                "trigger_id": 18,
-                "position_address": 140,
-                "position_length": 4,
-                "torque_address": 64,
-                "offsets_rad": [0.0] * 6,
-                "signs": [1] * 6,
-                "trigger_open_deg": 200.0,
-                "trigger_closed_deg": 160.0,
-                "sample_hz": 150.0,
-            }
-        )
+    settings = tmp_path / "teleop_config.py"
+    settings.write_text(
+        "from dataclasses import replace\n"
+        "from teleop_config import *\n"
+        "DEFAULT_NOVA_CONFIG = replace(DEFAULT_NOVA_CONFIG, ip='fixture')\n"
+        "DEFAULT_LEADER_CONFIG = replace(DEFAULT_LEADER_CONFIG, port='fixture')\n"
+        "DEFAULT_GRIPPER_CONFIG = replace(DEFAULT_GRIPPER_CONFIG, port='fixture', "
+        "open_position=2490, closed_position=1470)\n"
+        f"REPEAT_CHECKS = {config_data()['checks']!r}\n"
     )
     result = rt.run(
         [
             "--execute",
-            "--config",
-            str(config_path),
-            "--leader-config",
-            str(leader_path),
+            "--settings",
+            str(settings),
             "--gripper",
             "--gripper-enable-torque",
             "--max-speed",
@@ -316,10 +303,120 @@ def test_teleop_r_e_records_actual_writes_and_keeps_running(tmp_path, monkeypatc
     assert result == 0 and Nova.stopped == 1 and Keys.restored
     paths = list((tmp_path / "episodes").glob("*.jsonl"))
     assert len(paths) == 1
-    episode = load_episode(paths[0], RepeatConfig.load(config_path))
+    episode = load_episode(paths[0])
     assert [e["position"] for e in episode.events if e["kind"] == "gripper"] == [
         1470,
         2490,
     ]
     assert len([e for e in episode.events if e["kind"] == "arm"]) == 5
     assert Gripper.enabled == 0 and Gripper.disabled == 0
+
+
+@pytest.mark.parametrize(
+    "initial_torque,explicit", [(False, False), (False, True), (True, False)]
+)
+def test_repeat_gripper_torque_requires_explicit_flag(
+    monkeypatch, initial_torque, explicit
+):
+    import repeat_hardware as hardware
+    from teach_config import RepeatConfig, TeachError
+
+    class Gripper:
+        enabled = 0
+        torque = initial_torque
+
+        def open(self):
+            return SimpleNamespace(servo_id=1, torque_enabled=self.torque)
+
+        read_status = open
+
+        def enable_torque(self):
+            self.enabled += 1
+            self.torque = True
+
+    grip = Gripper()
+    nova = SimpleNamespace(connect=lambda: None, require_mode=lambda mode: None)
+    feedback = SimpleNamespace(
+        connect=lambda: None,
+        start=lambda: None,
+        state=lambda: SimpleNamespace(latest=True, error=None),
+    )
+    monkeypatch.setattr(hardware, "NovaClient", lambda _: nova)
+    monkeypatch.setattr(hardware, "NovaRealtimeReader", lambda *a: feedback)
+    monkeypatch.setattr(hardware, "NovaGripper", lambda **kw: grip)
+    monkeypatch.setattr(
+        hardware.GripperFeedback, "start", lambda self: setattr(self, "latest", True)
+    )
+    transport = hardware.HardwareTransport(RepeatConfig.parse(config_data()))
+    if not initial_torque and not explicit:
+        with pytest.raises(TeachError, match="explicitly"):
+            transport.open()
+    else:
+        transport.open(enable_gripper_torque=explicit)
+    assert grip.enabled == int(explicit and not initial_torque)
+
+
+def test_live_cli_reuses_python_settings_and_runs_once(tmp_path, monkeypatch):
+    import sys
+
+    import repeat_runtime
+    import run_repeat
+    from teach_config import RepeatConfig
+    from test_teach_repeat import MemoryTransport, make_episode
+
+    config = RepeatConfig.parse(config_data())
+    path = tmp_path / "episode.jsonl"
+    make_episode(path, config)
+    settings = tmp_path / "teleop_config.py"
+    settings.write_text(
+        "from dataclasses import replace\n"
+        "from teleop_config import *\n"
+        "DEFAULT_NOVA_CONFIG = replace(DEFAULT_NOVA_CONFIG, ip='fixture')\n"
+        "DEFAULT_GRIPPER_CONFIG = replace(DEFAULT_GRIPPER_CONFIG, port='fixture', "
+        "open_position=2490, closed_position=1470)\n"
+        f"REPEAT_CHECKS = {config_data()['checks']!r}\n"
+    )
+    clock = FakeClock()
+
+    class Transport(MemoryTransport):
+        opened: ClassVar[list[bool]] = []
+        closed = False
+
+        def __init__(self, config):
+            super().__init__(clock)
+            self.__class__.instance = self
+
+        def open(self, *, enable_gripper_torque=False):
+            self.opened.append(enable_gripper_torque)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules, "repeat_hardware", SimpleNamespace(HardwareTransport=Transport)
+    )
+    monkeypatch.setattr(repeat_runtime, "MonotonicClock", lambda: clock)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda: "REPLAY")
+    assert (
+        run_repeat.run(
+            [
+                str(path),
+                "--execute",
+                "--settings",
+                str(settings),
+                "--gripper-enable-torque",
+                "--report-dir",
+                str(tmp_path / "reports"),
+            ]
+        )
+        == 0
+    )
+    assert Transport.opened == [True]
+    assert Transport.instance.stops == 1 and Transport.instance.closed
+    reports = list((tmp_path / "reports").glob("*.json"))
+    import json
+
+    report = json.loads(reports[0].read_text())
+    assert report["status"] == "completed"
+    assert report["commands_sent"] == report["commands_expected"] == 5
