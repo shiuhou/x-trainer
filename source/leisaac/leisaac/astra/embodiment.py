@@ -1,0 +1,366 @@
+"""Official Inspect Robots contract over the upstream X-Trainer Isaac scene."""
+
+from __future__ import annotations
+
+import hashlib
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from PIL import Image
+from inspect_robots import (
+    ActionSemantics,
+    Box,
+    EmbodimentInfo,
+    Observation,
+    ObservationSpace,
+    StateField,
+    StateSpec,
+    CameraSpec,
+)
+
+from .contracts import (
+    CAMERAS,
+    LABELS,
+    Freshness,
+    Limits,
+    aperture_to_joints,
+    measured_aperture,
+)
+
+
+class XTrainerEmbodiment:
+    def __init__(self, env: Any, output: Path, *, open_only: bool = False):
+        import torch
+        from isaaclab.utils import math as math_utils
+        from .task import RIGHT_BASE_IN_ROOT, GRASP_IN_WRIST
+
+        self.torch, self.math, self.env = torch, math_utils, env
+        self.robot = env.scene["robot"]
+        self.output, self.open_only = output, open_only
+        self.limits = Limits(
+            chunk_path_m=0.01 if open_only else 0.30,
+            max_waypoints=32 if open_only else 64,
+        )
+        self.device = env.device
+        self.base = torch.tensor([RIGHT_BASE_IN_ROOT], device=self.device)
+        self.offset = torch.tensor([GRASP_IN_WRIST], device=self.device)
+        self.wrist_id = self.robot.find_bodies("J2_6")[0][0]
+        self.left_ids = self.robot.find_joints(
+            [f"J1_{i}" for i in range(1, 9)], preserve_order=True
+        )[0]
+        self.right_ids = self.robot.find_joints(
+            [f"J2_{i}" for i in range(1, 7)], preserve_order=True
+        )[0]
+        self.finger_ids = self.robot.find_joints(["J2_7", "J2_8"], preserve_order=True)[
+            0
+        ]
+        self.left_initial = self.robot.data.joint_pos[:, self.left_ids].clone()
+        self.reset_pos, self.reset_quat = self.pose()
+        self.reset_pos, self.reset_quat = (
+            self.reset_pos.clone(),
+            self.reset_quat.clone(),
+        )
+        self.generation, self.ticks = 0, 0
+        self.freshness = Freshness()
+        self.observation_trace: list[dict[str, Any]] = []
+        self.action_trace: list[dict[str, Any]] = []
+        self.timing = {
+            key: 0.0 for key in ("render", "validation", "execute", "settle")
+        }
+        self.current: Observation | None = None
+        self.consumed = False
+        self.instruction = ""
+        self.step_count = 0
+        self.closed_seen = False
+        self.grasp_seen = False
+        self.max_left_drift = 0.0
+        self.initial_cube = self.env.scene["cube"].data.root_pos_w.clone()
+        self.max_lift = 0.0
+        self.configure_views()
+        self.info = EmbodimentInfo(
+            name="xtrainer_isaac_right_simulation",
+            action_space=Box(
+                shape=(7,),
+                low=np.array([*self.limits.low, 0, 0, 0, 0]),
+                high=np.array([*self.limits.high, 0, 0, 0, 1]),
+                semantics=ActionSemantics(
+                    control_mode="eef_abs_pose",
+                    rotation_repr="none",
+                    frame="base",
+                    gripper="continuous",
+                    dim_labels=LABELS,
+                    max_step=(0.005, 0.005, 0.005, None, None, None, 0.2),
+                ),
+            ),
+            observation_space=ObservationSpace(
+                cameras=tuple(
+                    CameraSpec(name, shape[0], shape[1])
+                    for name, shape in CAMERAS.items()
+                ),
+                state=StateSpec((StateField("eef_state", (7,), "m,rad,normalized"),)),
+            ),
+            control_hz=10.0,
+            is_simulated=True,
+            capabilities=frozenset({"resettable", "renderable"}),
+            docs=(
+                "Simulation only. Control ONLY the right arm; left arm remains at rest. "
+                "move_to is absolute grasp-center position in metres in the right arm base frame. "
+                "yaw,pitch,roll are reset-relative radians and must all be zero. "
+                "Gripper 0 closes, 1 opens; always explicitly specify gripper for every move. "
+                "State gripper is measured position, which can differ from a closed command under contact. "
+                "front_rgb and right_rgb are fixed workspace views; wrist_rgb follows the right wrist. "
+                f"Maximum Cartesian path per decision {self.limits.chunk_path_m} m, "
+                f"maximum {self.limits.max_waypoints} interpolated waypoints. "
+                "A failed IK/tracking check aborts execution. After each chunk, physics settles and fresh images arrive. "
+                f"Initial rest grasp-center in base metres: {self.reset_pos[0].cpu().tolist()}. "
+                "For the cube-to-plate task return to the initial rest pose with open gripper after placing. "
+                + (
+                    "This connectivity check requires gripper=1 throughout."
+                    if open_only
+                    else ""
+                )
+            ),
+        )
+
+    def configure_views(self) -> None:
+        from .task import FIXED_VIEWS
+
+        t = self.torch
+        for name, (eye, lookat) in FIXED_VIEWS.items():
+            self.env.scene[name].set_world_poses_from_view(
+                t.tensor([eye], device=self.device),
+                t.tensor([lookat], device=self.device),
+            )
+
+    def pose(self) -> tuple[Any, Any]:
+        p, q = self.math.subtract_frame_transforms(
+            self.robot.data.root_pos_w,
+            self.robot.data.root_quat_w,
+            self.robot.data.body_pos_w[:, self.wrist_id],
+            self.robot.data.body_quat_w[:, self.wrist_id],
+        )
+        return p + self.math.quat_apply(q, self.offset) - self.base, q
+
+    def state(self) -> np.ndarray:
+        p, q = self.pose()
+        relative = self.math.quat_mul(self.math.quat_inv(self.reset_quat), q)
+        roll, pitch, yaw = self.math.euler_xyz_from_quat(relative)
+        rotation = np.array([yaw.item(), pitch.item(), roll.item()])
+        rotation = (rotation + np.pi) % (2 * np.pi) - np.pi
+        fingers = self.robot.data.joint_pos[0, self.finger_ids].cpu().numpy()
+        return np.array(
+            [*p[0].cpu().numpy(), *rotation, measured_aperture(*fingers)],
+            dtype=np.float64,
+        )
+
+    def observe(self, label: str) -> Observation:
+        started = time.monotonic()
+        self.env.sim.render()
+        images = {}
+        frames = {}
+        for name in CAMERAS:
+            sensor = self.env.scene[name]
+            sensor.update(0.0, force_recompute=True)
+            images[name] = sensor.data.output["rgb"][0, ..., :3].cpu().numpy().copy()
+            frames[name] = int(sensor.frame[0].item())
+        generation = self.generation + 1
+        sim_time = float(self.env.sim.current_time)
+        self.freshness.accept(generation, sim_time, images, frames)
+        self.generation = generation
+        obs = Observation(
+            images=images,
+            state={"eef_state": self.state()},
+            instruction=self.instruction,
+            image_times={n: sim_time for n in images},
+            state_time=sim_time,
+        )
+        self.current, self.consumed = obs, False
+        self.observation_trace.append(
+            {
+                "generation": generation,
+                "sim_time": sim_time,
+                "host_monotonic": time.monotonic(),
+                "sensor_frames": frames,
+                "eef_state": obs.state["eef_state"].tolist(),
+                "images": {
+                    n: hashlib.sha256(im.tobytes()).hexdigest()
+                    for n, im in images.items()
+                },
+            }
+        )
+        thumbs = []
+        for name, im in images.items():
+            image = Image.fromarray(im)
+            if label in ("initial", "final"):
+                image.save(self.output / f"{label}_{name}.png")
+            thumbs.append(image.resize((640, 480)))
+        montage = Image.new("RGB", (1920, 480))
+        for index, image in enumerate(thumbs):
+            montage.paste(image, (640 * index, 0))
+        montage.save(self.output / f"{label}_montage.png")
+        self.timing["render"] += time.monotonic() - started
+        return obs
+
+    def pre_check(self, rows: np.ndarray) -> str | None:
+        started = time.monotonic()
+        try:
+            if self.current is None or self.consumed:
+                raise ValueError("stale_observation")
+            self.limits.validate(np.asarray(rows), self.state())
+            if self.open_only and np.any(np.abs(rows[:, 6] - 1) > 1e-8):
+                raise ValueError("connectivity_requires_open_gripper")
+        except ValueError as exc:
+            return str(exc)
+        finally:
+            self.timing["validation"] += time.monotonic() - started
+        return None
+
+    def physics(self, row: np.ndarray) -> None:
+        t = self.torch
+        target = t.tensor(row[:3], device=self.device, dtype=t.float32).reshape(1, 3)
+        wrist = target + self.base - self.math.quat_apply(self.reset_quat, self.offset)
+        fingers = t.tensor([aperture_to_joints(float(row[6]))], device=self.device)
+        command = t.cat((self.left_initial, wrist, self.reset_quat, fingers), dim=-1)
+        self.env.step(command)
+        self.ticks += 1
+        if not t.isfinite(self.robot.data.joint_pos).all():
+            raise RuntimeError("execution_nonfinite")
+        drift = float(
+            t.max(
+                t.abs(self.robot.data.joint_pos[:, self.left_ids] - self.left_initial)
+            )
+        )
+        self.max_left_drift = max(self.max_left_drift, drift)
+        if drift > 0.02:
+            raise RuntimeError("left_arm_drift")
+        limits = self.robot.data.soft_joint_pos_limits[0]
+        joints = self.robot.data.joint_pos[0]
+        if bool(
+            t.any(joints < limits[:, 0] - 0.01) | t.any(joints > limits[:, 1] + 0.01)
+        ):
+            raise RuntimeError("joint_limit_reject")
+        lift = float((self.env.scene["cube"].data.root_pos_w - self.initial_cube)[0, 2])
+        self.max_lift = max(self.max_lift, lift)
+
+    def initialize_settled_scene(self) -> None:
+        """Hold the authored rest target while initial contacts settle."""
+        target = self.state().copy()
+        target[3:6], target[6] = 0, 1
+        self.settle(target)
+        self.initial_cube = self.env.scene["cube"].data.root_pos_w.clone()
+        self.max_lift = 0.0
+
+    def execute(self, chunk: Any, observation: Observation) -> Observation:
+        if observation is not self.current or self.consumed:
+            raise ValueError("stale_observation")
+        rows = np.array([action.data for action in chunk.actions], dtype=np.float64)
+        rejection = self.pre_check(rows)
+        if rejection:
+            raise ValueError(rejection)
+        self.consumed = True
+        for row in rows:
+            start = time.monotonic()
+            for _ in range(30):
+                self.physics(row)
+                state = self.state()
+                if (
+                    np.linalg.norm(state[:3] - row[:3]) < 0.003
+                    and np.linalg.norm(state[3:6]) < 0.035
+                ):
+                    break
+            else:
+                self.action_trace.append(
+                    {
+                        "status": "IK_tracking_failure",
+                        "target": row.tolist(),
+                        "actual": self.state().tolist(),
+                        "right_joints": self.robot.data.joint_pos[0, self.right_ids]
+                        .cpu()
+                        .tolist(),
+                    }
+                )
+                raise RuntimeError("IK_tracking_failure")
+            self.step_count += 1
+            self.closed_seen |= bool(row[6] < 0.2)
+            self.action_trace.append(
+                {
+                    "waypoint": self.step_count,
+                    "target": row.tolist(),
+                    "actual": self.state().tolist(),
+                }
+            )
+            self.timing["execute"] += time.monotonic() - start
+        self.settle(rows[-1])
+        return self.observe(f"decision_{len(self.observation_trace):02d}")
+
+    def settle(self, target: np.ndarray) -> None:
+        start = time.monotonic()
+        # Hold target while fingers reach their setpoint/contact equilibrium.
+        stable = 0
+        for _ in range(120):
+            self.physics(target)
+            speed = float(
+                self.robot.data.joint_vel[:, self.right_ids + self.finger_ids]
+                .abs()
+                .max()
+            )
+            cube = self.env.scene["cube"].data
+            object_still = (
+                float(cube.root_lin_vel_w.norm()) < 0.01
+                and float(cube.root_ang_vel_w.norm()) < 0.1
+            )
+            stable = stable + 1 if speed < 0.02 and object_still else 0
+            if stable >= 10:
+                break
+        else:
+            raise RuntimeError("settle_timeout")
+        if np.linalg.norm(self.state()[:3] - target[:3]) > 0.005:
+            raise RuntimeError("post_settle_tracking_failure")
+        self.timing["settle"] += time.monotonic() - start
+
+    def metrics(self) -> dict[str, Any]:
+        from isaaclab.managers import SceneEntityCfg
+        from leisaac.tasks.pick_cube.mdp.terminations import task_done
+        from leisaac.tasks.pick_cube.mdp.observations import (
+            object_grasped,
+            put_cube_to_plate,
+        )
+
+        kwargs = {
+            "object_cfg": SceneEntityCfg("cube"),
+            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
+        }
+        cube = self.env.scene["cube"].data
+        success = bool(
+            task_done(self.env, [SceneEntityCfg("cube")], SceneEntityCfg("Plate"))[0]
+        )
+        settled = (
+            float(cube.root_lin_vel_w.norm()) < 0.01
+            and float(cube.root_ang_vel_w.norm()) < 0.1
+        )
+        released = float(self.state()[6]) > 0.95
+        grasped = bool(object_grasped(self.env, **kwargs)[0])
+        self.grasp_seen |= grasped
+        return {
+            "upstream_success": success,
+            "success": success and released and settled,
+            "grasped_now": grasped,
+            "grasp_seen": self.grasp_seen,
+            "upstream_placed": bool(
+                put_cube_to_plate(
+                    self.env, plate_cfg=SceneEntityCfg("Plate"), **kwargs
+                )[0]
+            ),
+            "max_lift_m": self.max_lift,
+            "closed_command_seen": self.closed_seen,
+            "released": released,
+            "settled": settled,
+            "max_left_joint_drift_rad": self.max_left_drift,
+            "cube_pose": cube.root_state_w[0, :7].cpu().tolist(),
+            "plate_pose": self.env.scene["Plate"]
+            .data.root_state_w[0, :7]
+            .cpu()
+            .tolist(),
+        }
