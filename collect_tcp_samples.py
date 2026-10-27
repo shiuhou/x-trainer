@@ -28,6 +28,8 @@ def main(argv=None) -> None:
     parser.add_argument("--user", type=int, default=0)
     parser.add_argument("--tool", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.user != 0 or args.tool != 0:
+        parser.error("flange-to-TCP calibration requires user=0, tool=0")
     if args.output.exists():
         parser.error(f"output already exists: {args.output}; choose a new filename")
     client = NovaClient(
@@ -38,26 +40,27 @@ def main(argv=None) -> None:
             required_start_mode=DEFAULT_NOVA_CONFIG.required_start_mode,
         )
     )
-    samples = []
+    samples: list[dict] = []
     try:
         client.connect()
         mode = client.robot_mode()
-        print(f"RobotMode={mode}; read-only collection, no motion command will be sent.")
+        print(
+            f"RobotMode={mode}; read-only collection, no motion command will be sent."
+        )
         print(
             "Touch the same fixed reference point with the fingertip in at least "
             "six different orientations. Keep the robot still before each capture."
         )
         while True:
             try:
-                input(f"Press Enter to capture sample {len(samples) + 1} (Ctrl+C to finish): ")
+                input(
+                    f"Press Enter to capture sample {len(samples) + 1} (Ctrl+C to finish): "
+                )
             except EOFError:
                 break
             pose = client.get_pose(user=args.user, tool=args.tool)
             samples.append({"pose": pose, "host_time_ns": time.time_ns()})
-            print(
-                f"GetPose(user={args.user},tool={args.tool}): "
-                + json.dumps(pose)
-            )
+            print(f"GetPose(user={args.user},tool={args.tool}): " + json.dumps(pose))
             write_samples(args.output, args.user, args.tool, samples)
     except KeyboardInterrupt:
         pass

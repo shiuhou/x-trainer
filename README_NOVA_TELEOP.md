@@ -96,6 +96,12 @@ physical gripper reference point on a fixed reference point in at least six
 different orientations, keep the robot still, and capture one sample per
 orientation after confirming the endpoint manually:
 
+**Audit qualification:** the 197 mm and zero-rotation entries above are historical
+operator-confirmed nominal geometry (recorded uncertainty 5 mm), not an accepted
+precision TCP calibration. The eight-pose fit below does not validate them.
+Gripper polarity also conflicts with newer workspace notes; re-measure it in a
+separately authorized session before using these values for physical control.
+
 ```bash
 python3 collect_tcp_samples.py \
   --output tcp_samples/gripper_tcp_samples.json
@@ -108,6 +114,20 @@ X->Y->Z Euler convention. Review the residual and the physical contact setup
 before copying the printed candidate into `gripper_geometry.yaml`; TCP
 rotation is intentionally still null and no Tool definition is written
 automatically.
+
+The loader now requires a JSON object with explicit integer `user: 0`, `tool: 0`
+and `samples`; bare lists and unknown/nonzero frames are rejected instead of
+silently treating an already offset Tool pose as a flange pose. Historical input
+must be reviewed against its original capture before adding missing metadata.
+The collector also rejects nonzero frame arguments before connecting.
+Run independent SVD/leave-one-out diagnostics offline (NumPy required):
+
+```bash
+python3 tcp_calibration_audit.py /path/to/private/samples.json --output /path/to/new-report.json
+python3 -m pytest -q test_tcp_calibration.py
+```
+
+These diagnostics never accept a calibration or write controller settings.
 
 The first eight poses were recovered from the operator's terminal output into
 `tcp_samples/gripper_tcp_samples.json` after the original save failed: this

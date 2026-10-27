@@ -12,10 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
-
+from typing import cast
 
 Pose = tuple[float, float, float, float, float, float]
 Vector3 = tuple[float, float, float]
@@ -33,9 +33,15 @@ class TcpCalibrationResult:
 
 
 def _matmul(left: Matrix3, right: Matrix3) -> Matrix3:
-    return tuple(
-        tuple(sum(left[row][k] * right[k][column] for k in range(3)) for column in range(3))
-        for row in range(3)
+    return cast(
+        Matrix3,
+        tuple(
+            tuple(
+                sum(left[row][k] * right[k][column] for k in range(3))
+                for column in range(3)
+            )
+            for row in range(3)
+        ),
     )
 
 
@@ -78,7 +84,10 @@ def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list
 
 
 def _mat_vec(matrix: Matrix3, vector: Vector3) -> Vector3:
-    return tuple(sum(matrix[row][k] * vector[k] for k in range(3)) for row in range(3))
+    return cast(
+        Vector3,
+        tuple(sum(matrix[row][k] * vector[k] for k in range(3)) for row in range(3)),
+    )
 
 
 def solve_pivot(samples: Sequence[Pose]) -> TcpCalibrationResult:
@@ -92,7 +101,7 @@ def solve_pivot(samples: Sequence[Pose]) -> TcpCalibrationResult:
     for pose in samples:
         if len(pose) != 6 or any(not math.isfinite(float(value)) for value in pose):
             raise ValueError("Each pose must contain six finite values")
-        position = tuple(float(value) for value in pose[:3])
+        position = cast(Vector3, tuple(float(value) for value in pose[:3]))
         rotation = rotation_matrix_xyz(*pose[3:])
         rotations.append(rotation)
         positions.append(position)
@@ -105,12 +114,16 @@ def solve_pivot(samples: Sequence[Pose]) -> TcpCalibrationResult:
                 for right in range(6):
                     normal[left][right] += row[left] * row[right]
     solution = _solve_linear_system(normal, normal_rhs)
-    tcp = tuple(solution[:3])
-    fixed = tuple(solution[3:])
+    tcp = cast(Vector3, tuple(solution[:3]))
+    fixed = cast(Vector3, tuple(solution[3:]))
     residuals = []
     for position, rotation in zip(positions, rotations):
-        predicted = tuple(position[index] + _mat_vec(rotation, tcp)[index] for index in range(3))
-        residuals.append(math.sqrt(sum((predicted[index] - fixed[index]) ** 2 for index in range(3))))
+        predicted = tuple(
+            position[index] + _mat_vec(rotation, tcp)[index] for index in range(3)
+        )
+        residuals.append(
+            math.sqrt(sum((predicted[index] - fixed[index]) ** 2 for index in range(3)))
+        )
     rms = math.sqrt(sum(value * value for value in residuals) / len(residuals))
     return TcpCalibrationResult(
         tcp_flange_mm=tcp,
@@ -124,15 +137,27 @@ def solve_pivot(samples: Sequence[Pose]) -> TcpCalibrationResult:
 
 def load_samples(path: Path) -> list[Pose]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    values = payload.get("samples") if isinstance(payload, dict) else payload
+    # A Tool 1 pose is already offset from the flange. Fitting it and labelling
+    # the result flange-to-TCP silently produces the wrong transform.
+    if not isinstance(payload, dict) or any(
+        type(payload.get(key)) is not int or payload[key] != 0
+        for key in ("user", "tool")
+    ):
+        raise ValueError("TCP samples require explicit user=0, tool=0 metadata")
+    values = payload.get("samples")
     if not isinstance(values, list):
-        raise ValueError("Sample file must contain a JSON list or {\"samples\": [...]}")
+        raise TypeError('Sample file must contain a "samples" list')
     samples = []
     for item in values:
+        if isinstance(item, dict) and any(
+            key in item and (type(item[key]) is not int or item[key] != 0)
+            for key in ("user", "tool")
+        ):
+            raise ValueError("TCP samples require consistent user=0, tool=0 metadata")
         pose = item.get("pose") if isinstance(item, dict) else item
         if not isinstance(pose, list) or len(pose) != 6:
             raise ValueError("Each sample must provide pose=[x,y,z,rx,ry,rz]")
-        samples.append(tuple(float(value) for value in pose))
+        samples.append(cast(Pose, tuple(float(value) for value in pose)))
     return samples
 
 
