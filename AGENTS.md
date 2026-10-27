@@ -44,3 +44,7 @@ Only reviewed sanitized changes belong here; commit and push them to
 publish directly from the original local `/home/dsa/project/dobot/x-trainer`
 upstream checkout, and never commit component source as ordinary files in the
 meta repository.
+
+## Shared engineering specification
+
+Apply the Dobot workspace [engineering specification](https://github.com/shiuhou/dobot-astra-lab/blob/7106a99/.agents/docs/SPEC.md). In a Dobot workspace, read the root `.agents/docs/SPEC.md`; for a standalone clone use the pinned link. This is the single source for baseline/root-cause review, improvement acceptance, retirement, behavior validation and bounded artifacts. Preserve this repository's hardware, testing and publication rules. Keep tests/configuration in this repository; `.agents/` tracks only `docs/`, with plans/runs kept local. Complex tasks use one plan with a §0 progress/handoff section; simple tasks need none.

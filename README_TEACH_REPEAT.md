@@ -4,6 +4,9 @@
 直接沿用已跑通的 `teleop_config.py`，不需要另填型號、韌體、校準識別或 Leader JSON。
 回放不需要 Leader 或相機，不重新計算映射、平滑或變速。
 
+舊版 `--config` / `--leader-config` JSON 流程已退役；目前入口使用 `--settings`。
+回放可用明確的 `--gripper-enable-torque` 開啟扭矩，結束不自動鬆爪或關扭矩。
+
 ## 本機既有遙操
 
 本 workspace 的研究 checkout 已接入共用錄製器；原本的遙操參數與夾爪映射保持原樣：

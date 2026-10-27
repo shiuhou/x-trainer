@@ -85,3 +85,7 @@ repeat_reports/
 teleop_config.local.py
 .agents/*
 !.agents/docs/
+
+# Local engineering plans and diagnostic runs; shared rules stay in the meta repo.
+.agents/*
+!.agents/docs/
