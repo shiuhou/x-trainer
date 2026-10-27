@@ -24,7 +24,8 @@ Both model `move_to` calls were rejected by the open-only gripper check; the
 agent then exhausted its two-call budget and returned a synthetic stop. This is
 **live FAIL, not a transport failure or mission success**. The relay reported
 `gpt-6-astra`; total usage was 59,687 tokens and episode time 29.421 seconds.
-No further paid run or autonomous mission was performed.
+That failed episode was preserved without retry; the subsequently authorized
+post-fix experiment is recorded below.
 
 Offline reproduction identified the adapter defect: measured opening
 `0.9999999511267113` produced interpolated commands slightly below 1, which
@@ -38,7 +39,64 @@ with the corrected space. Closing commands remain rejected in connectivity mode.
 The updated Isaac smoke passed: two mock Responses calls through the open-only
 contract, six total waypoints, generations 1..6, 98 recorded physics steps,
 10.698 seconds. This is offline validation; it does not turn the failed live run
-into a PASS. A new paid connectivity experiment needs a new request budget.
+into a PASS. The operator subsequently authorized two additional connectivity
+requests, raising the overall ceiling from 14 to 16, with one <=12-request
+mission conditional on genuine connectivity PASS.
+
+The authorized post-fix **live connectivity PASS** used implementation
+`11fd66a1775d640f4adc3cf87f02bed5d3f172a4`, the same pinned official agent,
+SciTrace Responses and `gpt-6-astra`. Automatic proxy selection passed CONNECT
+and TLS checks. Two real requests produced two `move_to` decisions and three
+official interpolated waypoints. Measured base Z went
+`0.255655527 → 0.260686576 → 0.255710781 m`; all commanded gripper values were 1.
+Physics/settle completed before each new observation: generations 1, 2, 3 at
+simulation times 0.433333, 1.000000, 1.566667 s. The recorded episode has 46
+physics steps. Model usage was 61,576 tokens; model time 19.379 s, render 0.934 s,
+validation 0.003 s, execution 0.265 s, settle 1.717 s, total 28.230 s. These are
+relay-reported token/model metadata; successful API routing does not attest
+upstream model weights. Hardware/network guard violations were zero.
+
+The single authorized **autonomous cube-to-plate mission FAILED** at
+`execution / settle_timeout` on decision 6 (closing the gripper). There were six
+real requests, six decisions, 129 executed waypoints, five completed post-action
+observations (generations 1..6 including initial), and 636 recorded physics steps.
+The original task, scene, cameras, IK, physics, workspace and evaluator were
+unchanged. No second mission or automatic retry was run. This distinguishes a
+working Astra/Isaac closed loop from an unsuccessful manipulation task.
+
+The evaluator reported `success=false`, `upstream_success=false`,
+`grasp_seen=false`, `grasped_now=false`, `upstream_placed=false`,
+`released=false`, `settled=false`. Maximum measured cube lift after initial
+settling was effectively zero (7.45e-9 m); transport and placement were not
+reached. The model kept the gripper open for its five approach decisions, then
+commanded closure. At the last completed waypoint the measured aperture was
+0.5219; the subsequent bounded settle failed. Left-arm maximum joint drift was
+0.012479 rad, within its existing abort bound.
+
+Read-only analysis of the final 120 recorded physics ticks found cube linear
+speed 0.0511–0.1598 m/s (last 0.0958), angular speed 2.480–10.049 rad/s
+(last 8.531), and zero ticks meeting the existing object-still thresholds
+(0.01 m/s and 0.1 rad/s). Therefore extending the time threshold is not an
+established fix. Persistent motion during closure explains the settle rejection;
+the underlying cause among approach/contact geometry/controller dynamics has
+not been isolated. No physics parameter or success criterion was relaxed.
+
+Mission usage was 194,297 tokens. Model time was 101.757 s, render 1.321 s,
+validation 0.039 s, execution 14.680 s, completed settle 3.046 s, total 131.674 s:
+the measured loop was predominantly model-bound. The failed settle's duration
+is included in total time but not in the settle subtotal, since that accumulator
+updates only on successful return. Runner total timings exclude Kit startup and
+host proxy preflight. Both new episodes combined used 8 real requests and
+255,873 tokens; including the earlier failed two-call connectivity run, 10 of
+the newly authorized 16-request ceiling were consumed. Unused budget was not
+used to retry the failed mission.
+
+Evidence limitation: mission `final_*` images are the last successful policy
+observation (generation 6), **before** the failed close/settle, not fresh images
+of the terminal physics state. The exact terminal state and velocities are in
+`mission-1/episode.hdf5`; `result.json` records the post-failure evaluator state.
+The original failed result and recording are preserved. No private reasoning,
+credential content, or physical-device access was introduced.
 
 Scoped validation: 32 adapter tests, Ruff, formatting, mypy (six owned modules,
 `--follow-imports=skip --ignore-missing-imports`), compilation and shell syntax
@@ -54,6 +112,8 @@ Local evidence under `.agents/runs/xtrainer-astra/`:
 - `connect-live/`: preserved proxy failure, initial images and transport accounting.
 - `connect-configured-proxy/`: preserved two-response live failure, original measured state and targets.
 - `offline-open-contract/`: corrected open-only official-agent smoke, recording and fresh frames.
+- `connect-open-contract/`: authorized post-fix live connectivity PASS, actions, fresh images and recording.
+- `mission-1/`: the single autonomous mission failure, action/observation traces, evaluator, usage and full physics recording.
 - `smoke-tracking/`: uncompensated IK failure for comparison.
 
 ## Runtime
