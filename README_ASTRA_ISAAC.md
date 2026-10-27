@@ -429,3 +429,71 @@ compilation and shell syntax PASS. The original live/provider behavior is
 unchanged. No MuJoCo or upstream-wide regression suite was rerun; no credentials
 were loaded, no provider calls/hardware connections were made, and nothing was
 pushed. A fresh paid Astra trial is not authorized by these offline results.
+
+### Contact-force follow-up (still blocked)
+
+The operator subsequently requested fixing the grasp before a single further
+Astra trial. That trial remains conditional on two complete scripted pick/place
+acceptances; none has passed, and no new provider request has been made.
+
+Four additional bounded offline episodes used the same initial recording and
+approach, with contact reporting enabled only for diagnosis. The reporting-only
+control exactly reproduces all 651 earlier center-candidate controls, joint
+positions/velocities and cube states (maximum absolute difference zero).
+Original USD files and all physical parameters remain unchanged.
+
+PhysX contact/rest offsets are 5.45/0 mm. The cube and fingers contact with
+millimetres of reported penetration under the fully closed position target.
+Reducing commanded closure reduces measured contact load, but does not meet
+the existing stability criterion. The last comparison also centers XY on the
+measured cube, removing the original approximately 5 mm horizontal offset.
+
+Statistics below cover the last 120 **physics substeps**, not control steps.
+Forces are the mean sum of absolute contact-normal forces per finger; they are
+not net force, calibrated force sensing, or a new commanded-force interface.
+
+| Aperture command | XY target | Finger forces (N) | Cube linear speed (m/s) | Angular speed (rad/s) | Stable substeps |
+| ---: | --- | --- | --- | --- | --- |
+| 0 | Original | 7.439 / 7.456 | 0.23003–0.23016 | 6.231–6.246 | 0/120 |
+| 0.5 | Original | 1.604 / 1.581 | 0.04997–0.05006 | 5.224–5.255 | 0/120 |
+| 0.625 | Original | 0.176 / 0.195 | 0.01165–0.01167 | 0.3765–0.3767 | 0/120 |
+| 0.625 | Cube-centered | 0.173 / 0.199 | 0.00756–0.00758 | 0.3211–0.3219 | 0/120 |
+
+The first case reports approximately 3.78/3.15 mm maximum finger penetration.
+At its last 120 substeps, position-derived speed is only 1.05e-6–2.32e-5 m/s,
+while PhysX reports approximately 0.230 m/s. Thus the discrepancy persists at
+the native physics sampling interval; merely sampling twice per control step
+does not resolve it. Neither pose differences nor the upstream grasp heuristic
+are substituted for the unchanged velocity checks.
+
+The USD inspection confirms that the `J2_8/collisions` merged collider and its
+child mesh both declare CollisionAPI; native contact traces contain repeated
+contact locations for this finger. **Causation is not yet established.** An
+isolated control disabling the redundant standalone collision declaration needs
+explicit authorization because it changes the protected upstream collision
+configuration. No collider change or live adapter workaround has been adopted.
+All four episodes stop at `settle_timeout`; no complete lift/hold/transport/
+release/rest acceptance or Astra trial follows.
+
+Evidence remains in the local task area:
+`.agents/runs/xtrainer-astra/grasp-diagnosis/contact-followup/`, including one
+compact `comparison.json`, contact properties, bounded contact/substep samples,
+normal physics recordings and unchanged-state terminal images. The original
+`mission-1` recording hash is unchanged. Raw traces are not published.
+
+The diagnostic runner additionally supports `--diagnostic-case contact`,
+`--diagnostic-aperture` (0..1), and `--center-cube`. Contact reporting is enabled
+only in that offline case; it cannot enter the model observation. It retains at
+most 256 closing substeps and restores the normal scene update function on exit.
+These flags are investigative controls, not a validated grasp controller.
+The four measurements used Isaac's contact-activation helper. Source review
+then found it also authors a sleep-threshold attribute on the passed mount prim
+(a non-rigid parent here). The shipped diagnostic spawner instead adds only
+ContactReportAPI and its reporting threshold; it does not write sleep settings.
+The recorded trajectory-equivalence check applies to the measured helper path.
+
+Follow-up validation: **52 focused tests PASS**, scoped Ruff/format, mypy
+(five own source modules), compilation and shell syntax PASS. A native USD
+spawn comparison covers 29 rigid bodies with zero physics steps: only
+ContactReportAPI/reporting-threshold additions differ; no sleep or collision
+properties change. This validates instrumentation, not a successful grasp.

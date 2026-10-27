@@ -653,3 +653,177 @@ def test_raw_diagnosis_result_serializes_numpy_stability_without_advancing_termi
     assert result["outcome"] == "recorded_settled"
     assert captures[-1] == 130 and len(samples) == 130
     assert emb.diagnostic_hook is None
+
+
+@pytest.mark.parametrize("aperture", [float("nan"), -0.01, 1.01])
+def test_diagnostic_aperture_rejected_before_simulator_access(aperture, tmp_path):
+    from leisaac.astra.diagnose import run_diagnosis
+
+    with pytest.raises(ValueError, match="invalid_diagnostic_aperture"):
+        run_diagnosis(None, None, tmp_path, "contact", aperture=aperture)
+
+
+def test_contact_diagnostic_sampling_is_bounded_read_only_and_restores_update(tmp_path):
+    import json
+    from collections import deque
+    from types import SimpleNamespace
+    from leisaac.astra.diagnose import ContactDiagnostics
+
+    class Tensor(np.ndarray):
+        def cpu(self):
+            return self
+
+    def tensor(value):
+        return np.asarray(value).view(Tensor)
+
+    updates = []
+
+    def original(dt):
+        updates.append(dt)
+
+    scene = {
+        "cube": SimpleNamespace(data=SimpleNamespace(root_state_w=tensor([[0] * 13])))
+    }
+
+    class Scene(dict):
+        update = original
+
+    scene = Scene(scene)
+    probe = ContactDiagnostics.__new__(ContactDiagnostics)
+    probe.original_update = original
+    probe.diagnostics = SimpleNamespace(phase="approach")
+    probe.samples = deque(maxlen=256)
+    probe.emb = SimpleNamespace(
+        output=tmp_path,
+        env=SimpleNamespace(scene=scene, sim=SimpleNamespace(current_time=1.0)),
+        robot=SimpleNamespace(
+            data=SimpleNamespace(
+                joint_pos=tensor([[0] * 8]),
+                joint_vel=tensor([[0] * 8]),
+            )
+        ),
+        right_ids=list(range(6)),
+        finger_ids=[6, 7],
+    )
+    probe.contact = SimpleNamespace(
+        filter_count=1,
+        get_contact_data=lambda dt: (
+            tensor([[2.0], [99.0]]),
+            tensor([[1, 2, 3], [9, 9, 9]]),
+            tensor([[0, 0, 1], [1, 0, 0]]),
+            tensor([[-0.001], [-0.9]]),
+            tensor([[1]]),
+            tensor([[0]]),
+        ),
+        get_net_contact_forces=lambda dt: tensor([[0, 0, 2]]),
+    )
+    scene.update = probe.update
+    probe.update(1 / 60)
+    assert not probe.samples
+    probe.diagnostics.phase = "close"
+    for i in range(300):
+        probe.emb.env.sim.current_time = i / 60
+        probe.update(1 / 60)
+    assert len(updates) == 301 and len(probe.samples) == 256
+    assert probe.samples[0]["sim_time"] == 44 / 60
+    assert probe.samples[-1]["contacts"][0]["normal_force_N"] == [[2.0]]
+    probe.close()
+    assert scene.update is original
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "contact_substeps.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 256 and rows[-1]["sim_time"] == 299 / 60
+
+
+def test_contact_spawn_adds_reporting_without_sleep_or_collision_edits(monkeypatch):
+    from types import ModuleType, SimpleNamespace
+    from leisaac.astra.diagnose import spawn_with_contact_reporting
+
+    calls = []
+    rigid_api = object()
+    body = SimpleNamespace(HasAPI=lambda schema: schema is rigid_api)
+    root = SimpleNamespace(HasAPI=lambda schema: False)
+    cfg = object()
+    sim = ModuleType("isaaclab.sim")
+
+    def spawn(path, config, **kwargs):
+        calls.append(("spawn", path, config, kwargs))
+        return root
+
+    sim.spawn_from_usd = spawn
+    monkeypatch.setitem(sys.modules, "isaaclab.sim", sim)
+
+    def apply(prim):
+        assert prim is body
+        calls.append(("report", prim))
+        return SimpleNamespace(
+            CreateThresholdAttr=lambda: SimpleNamespace(
+                Set=lambda threshold: calls.append(("report_threshold", threshold))
+            )
+        )
+
+    # No PhysxRigidBodyAPI or collider modification API is exposed by this fixture.
+    monkeypatch.setitem(
+        sys.modules,
+        "pxr",
+        SimpleNamespace(
+            Usd=SimpleNamespace(PrimRange=lambda prim: [root, body]),
+            UsdPhysics=SimpleNamespace(RigidBodyAPI=rigid_api),
+            PhysxSchema=SimpleNamespace(
+                PhysxContactReportAPI=SimpleNamespace(Apply=apply)
+            ),
+        ),
+    )
+    assert spawn_with_contact_reporting("/Scene", cfg, translation=(1, 2, 3)) is root
+    assert calls == [
+        ("spawn", "/Scene", cfg, {"translation": (1, 2, 3)}),
+        ("report", body),
+        ("report_threshold", 0.0),
+    ]
+
+
+def test_contact_candidate_uses_validated_xyz_and_partial_closure_timing(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from leisaac.astra import diagnose
+
+    (tmp_path / "episode.hdf5").write_bytes(b"synthetic fixture")
+    target = np.array([-0.554, -0.002, 0.043, 0, 0, 0, 1.0])
+    calls = []
+
+    def candidate(shift, *, center_cube):
+        assert shift == 0 and center_cube
+        return target, {"target": target.tolist()}
+
+    trace = SimpleNamespace(candidate=candidate, save=lambda: None)
+    monkeypatch.setattr(diagnose, "Diagnostics", lambda emb: trace)
+    monkeypatch.setattr(
+        diagnose, "ContactDiagnostics", lambda diag: SimpleNamespace(close=lambda: None)
+    )
+    monkeypatch.setattr(
+        diagnose, "move", lambda emb, row, **kw: calls.append((row, kw))
+    )
+    emb = SimpleNamespace(
+        initialize_settled_scene=lambda: None,
+        observe=lambda label: None,
+        diagnostic_capture=lambda label: {"policy_usable": False},
+    )
+    result = diagnose.run_diagnosis(
+        emb,
+        None,
+        tmp_path,
+        "contact",
+        aperture=0.625,
+        center_cube=True,
+        slow_close=True,
+    )
+    assert result["outcome"] == "candidate_settled"
+    assert result["commanded_aperture"] == 0.625
+    np.testing.assert_array_equal(calls[-2][0], target)
+    expected = target.copy()
+    expected[6] = 0.625
+    np.testing.assert_array_equal(calls[-1][0], expected)
+    assert calls[-1][1]["minimum_ticks"] == 2
+    assert all(call[1]["minimum_ticks"] == 1 for call in calls[:-1])

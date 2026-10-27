@@ -19,7 +19,11 @@ def arguments() -> argparse.Namespace:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diagnostic-source", type=Path)
-    parser.add_argument("--diagnostic-case", choices=("raw", "cartesian", "height"))
+    parser.add_argument(
+        "--diagnostic-case", choices=("raw", "cartesian", "height", "contact")
+    )
+    parser.add_argument("--diagnostic-aperture", type=float, default=0.0)
+    parser.add_argument("--center-cube", action="store_true")
     parser.add_argument(
         "--height-shift", type=float, choices=(-0.005, 0.0, 0.005), default=0.0
     )
@@ -68,6 +72,12 @@ def main() -> int:
             None if args.mode == "original" else str(args.output),
             original=args.mode == "original",
         )
+        if args.mode == "diagnose" and args.diagnostic_case == "contact":
+            from leisaac.astra.diagnose import spawn_with_contact_reporting
+
+            # Enable reporting only: preserve all collider and dynamics properties.
+            cfg.scene.robot.spawn.func = spawn_with_contact_reporting
+            cfg.scene.scene.spawn.func = spawn_with_contact_reporting
         env = ManagerBasedRLEnv(cfg=cfg)
         env.reset(seed=42)
         if args.mode == "original":
@@ -99,6 +109,8 @@ def main() -> int:
                 args.diagnostic_case,
                 height_shift=args.height_shift,
                 slow_close=args.slow_close,
+                aperture=args.diagnostic_aperture,
+                center_cube=args.center_cube,
             )
             result["status"] = "DIAGNOSE_COMPLETE"
             return 0

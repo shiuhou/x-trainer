@@ -5,12 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .contracts import LABELS
+
+
+def spawn_with_contact_reporting(prim_path: str, cfg: Any, **kwargs: Any) -> Any:
+    """Add reporting only; Isaac's generic helper also writes sleep thresholds."""
+    from isaaclab.sim import spawn_from_usd
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    prim = spawn_from_usd(prim_path, cfg, **kwargs)
+    for child in Usd.PrimRange(prim):
+        if child.HasAPI(UsdPhysics.RigidBodyAPI):
+            report = PhysxSchema.PhysxContactReportAPI.Apply(child)
+            report.CreateThresholdAttr().Set(0.0)
+    return prim
 
 
 def validate_replay_commands(actions: np.ndarray) -> None:
@@ -217,7 +231,9 @@ class Diagnostics:
         )
         return (local - emb.base)[0].cpu().numpy()
 
-    def candidate(self, shift: float) -> tuple[np.ndarray, dict]:
+    def candidate(
+        self, shift: float, *, center_cube: bool = False
+    ) -> tuple[np.ndarray, dict]:
         if shift not in (-0.005, 0.0, 0.005):
             raise ValueError("height_candidate_not_in_approved_set")
         emb = self.emb
@@ -235,6 +251,8 @@ class Diagnostics:
         target = np.array(
             [-0.55, 0, self.world_to_base(cube)[2] - delta[2] + shift, 0, 0, 0, 1]
         )
+        if center_cube:
+            target[:2] = self.world_to_base(cube)[:2]
         # Predict open collision vertices at the commanded height. Geometry only,
         # before any candidate motion; reject even nominal table penetration.
         wrist = (
@@ -348,6 +366,88 @@ def move(emb: Any, target: np.ndarray, *, minimum_ticks: int = 1) -> None:
     emb.execute(result.chunk, emb.current, minimum_ticks=minimum_ticks)
 
 
+class ContactDiagnostics:
+    """Read-only PhysX contact and substep sampling, outside policy observations."""
+
+    def __init__(self, diagnostics: Diagnostics):
+        from isaacsim.core.simulation_manager import SimulationManager
+
+        self.diagnostics = diagnostics
+        self.emb = emb = diagnostics.emb
+        self.samples: deque[dict] = deque(maxlen=256)
+        view = SimulationManager.get_physics_sim_view()
+        root = emb.robot.cfg.prim_path.replace(".*", "0")
+        cube = diagnostics.geometry["cube"]["prim"]
+        self.contact = view.create_rigid_contact_view(
+            cube,
+            [
+                root + "/x_trainer_asm_0226_SLDASM/" + n
+                for n in ("J2_7", "J2_8", "base_link")
+            ],
+            max_contact_data_count=256,
+        )
+        properties = {}
+        for name, rigid in (("robot", emb.robot), ("cube", emb.env.scene["cube"])):
+            physx = rigid.root_physx_view
+            properties[name] = {
+                "contact_offsets": physx.get_contact_offsets().cpu().tolist(),
+                "rest_offsets": physx.get_rest_offsets().cpu().tolist(),
+                "materials": physx.get_material_properties().cpu().tolist(),
+            }
+        properties["sensor_paths"] = self.contact.sensor_paths
+        properties["filter_paths"] = self.contact.filter_paths
+        (emb.output / "contact_properties.json").write_text(
+            json.dumps(properties, indent=2)
+        )
+        self.original_update = emb.env.scene.update
+        emb.env.scene.update = self.update
+
+    def update(self, dt: float) -> None:
+        self.original_update(dt)
+        if self.diagnostics.phase != "close":
+            return
+        emb = self.emb
+        force, points, normals, separation, counts, starts = (
+            self.contact.get_contact_data(dt)
+        )
+        contacts = []
+        for j in range(self.contact.filter_count):
+            start, count = int(starts[0, j]), int(counts[0, j])
+            sl = slice(start, start + count)
+            contacts.append(
+                {
+                    "filter": j,
+                    "count": count,
+                    "normal_force_N": force[sl].cpu().tolist(),
+                    "points_w": points[sl].cpu().tolist(),
+                    "normals_w": normals[sl].cpu().tolist(),
+                    "separation_m": separation[sl].cpu().tolist(),
+                }
+            )
+        self.samples.append(
+            {
+                "sim_time": float(emb.env.sim.current_time),
+                "cube_state": emb.env.scene["cube"].data.root_state_w[0].cpu().tolist(),
+                "joint_pos": emb.robot.data.joint_pos[0, emb.right_ids + emb.finger_ids]
+                .cpu()
+                .tolist(),
+                "joint_vel": emb.robot.data.joint_vel[0, emb.right_ids + emb.finger_ids]
+                .cpu()
+                .tolist(),
+                "net_contact_force_N": self.contact.get_net_contact_forces(dt)
+                .cpu()
+                .tolist(),
+                "contacts": contacts,
+            }
+        )
+
+    def close(self) -> None:
+        self.emb.env.scene.update = self.original_update
+        (self.emb.output / "contact_substeps.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in self.samples)
+        )
+
+
 def run_diagnosis(
     emb: Any,
     episode: Any,
@@ -356,13 +456,20 @@ def run_diagnosis(
     *,
     height_shift: float = 0.0,
     slow_close: bool = False,
+    aperture: float = 0.0,
+    center_cube: bool = False,
 ) -> dict:
+    if not np.isfinite(aperture) or not 0 <= aperture <= 1:
+        raise ValueError("invalid_diagnostic_aperture")
     diagnostics = Diagnostics(emb)
+    contacts = ContactDiagnostics(diagnostics) if case == "contact" else None
     emb.diagnostic_hook = diagnostics
     result: dict[str, Any] = {
         "case": case,
         "privileged_scripted_baseline": True,
         "provider_requests": 0,
+        "commanded_aperture": aperture,
+        "center_cube": center_cube,
         "raw_replay_only_initial_state_restored": True,
         "source_sha256": hashlib.sha256(
             (source / "episode.hdf5").read_bytes()
@@ -400,9 +507,11 @@ def run_diagnosis(
             emb.initialize_settled_scene()
             emb.observe("initial")
             candidate = None
-            if case == "height":
-                candidate, result["candidate"] = diagnostics.candidate(height_shift)
-            targets = [
+            if case in ("height", "contact"):
+                candidate, result["candidate"] = diagnostics.candidate(
+                    height_shift, center_cube=center_cube
+                )
+            targets: list[tuple[float, float, float, float]] = [
                 (-0.345, 0.0425, 0.2557, 1),
                 (-0.55, -0.1, 0.2, 1),
                 (-0.55, -0.16, 0.12, 1),
@@ -411,14 +520,18 @@ def run_diagnosis(
                 (-0.55, 0, 0.075, 0),
             ]
             if candidate is not None:
-                targets[-2] = (-0.55, 0, float(candidate[2]), 1)
-                targets[-1] = (-0.55, 0, float(candidate[2]), 0)
+                x, y, z = map(float, candidate[:3])
+                targets[-2] = (x, y, z, 1)
+                targets[-1] = (x, y, z, 0)
             for index, (x, y, z, grip) in enumerate(targets):
-                diagnostics.phase = "close" if grip == 0 else f"approach_{index + 1}"
+                closing = grip == 0
+                diagnostics.phase = "close" if closing else f"approach_{index + 1}"
+                if closing:
+                    grip = aperture
                 move(
                     emb,
                     np.array([x, y, z, 0, 0, 0, grip]),
-                    minimum_ticks=2 if slow_close and grip == 0 else 1,
+                    minimum_ticks=2 if slow_close and closing else 1,
                 )
             result["outcome"] = (
                 "cartesian_settled" if case == "cartesian" else "candidate_settled"
@@ -430,6 +543,8 @@ def run_diagnosis(
             failure_phase=diagnostics.phase,
         )
     finally:
+        if contacts is not None:
+            contacts.close()
         diagnostics.save()
         emb.diagnostic_hook = None
         result["terminal_capture"] = emb.diagnostic_capture("terminal_diagnostic")
