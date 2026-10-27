@@ -20,11 +20,12 @@ from leisaac.tasks.template.xtrainer_arm_env_cfg import (
     euler_to_quat,
 )
 
-# Authored right-shoulder joint anchor in the USD shared base frame. The right
-# mounting plane is 223.4 mm below this anchor (same as the left Nova pedestal).
+# Root-aligned right pedestal reference, NOT the shoulder-joint origin.
+# USD J2_1 localPos0 is (1.06, 0, 0.2234): its joint anchor is 223.4 mm
+# above this reference. Preserve the existing public coordinate convention.
 RIGHT_BASE_IN_ROOT = (1.06, 0.0, 0.0)
 # Same grasp-center convention as upstream pick_cube/mdp/observations.py.
-# The source fingers extend to ~197 mm; their contact region includes Z=160 mm.
+# This is a reference convention, not a measured center of contact pressure.
 GRASP_IN_WRIST = (0.0, 0.0, 0.16)
 FIXED_VIEWS = {
     "front_rgb": ((0.55, -1.0, 0.8), (0.60, 0.0, 0.15)),

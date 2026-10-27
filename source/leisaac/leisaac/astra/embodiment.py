@@ -79,6 +79,7 @@ class XTrainerEmbodiment:
         self.max_left_drift = 0.0
         self.initial_cube = self.env.scene["cube"].data.root_pos_w.clone()
         self.max_lift = 0.0
+        self.diagnostic_hook = None
         self.configure_views()
         self.info = EmbodimentInfo(
             name="xtrainer_isaac_right_simulation",
@@ -173,8 +174,8 @@ class XTrainerEmbodiment:
             dtype=np.float64,
         )
 
-    def observe(self, label: str) -> Observation:
-        started = time.monotonic()
+    def capture_images(self) -> tuple[dict, dict]:
+        """Render current physics state, without advancing simulation."""
         self.env.sim.render()
         images = {}
         frames = {}
@@ -183,6 +184,34 @@ class XTrainerEmbodiment:
             sensor.update(0.0, force_recompute=True)
             images[name] = sensor.data.output["rgb"][0, ..., :3].cpu().numpy().copy()
             frames[name] = int(sensor.frame[0].item())
+        return images, frames
+
+    def diagnostic_capture(self, label: str) -> dict[str, Any]:
+        """Terminal evidence only; never publish a policy observation/generation."""
+        started = time.monotonic()
+        sim_time = float(self.env.sim.current_time)
+        images, frames = self.capture_images()
+        if float(self.env.sim.current_time) != sim_time:
+            raise RuntimeError("diagnostic_capture_advanced_physics")
+        montage = Image.new("RGB", (1920, 480))
+        for index, (name, pixels) in enumerate(images.items()):
+            im = Image.fromarray(pixels)
+            im.save(self.output / f"{label}_{name}.png")
+            montage.paste(im.resize((640, 480)), (index * 640, 0))
+        montage.save(self.output / f"{label}_montage.png")
+        self.timing["render"] += time.monotonic() - started
+        return {
+            "kind": "diagnostic_only",
+            "policy_usable": False,
+            "sim_time": sim_time,
+            "ticks": self.ticks,
+            "last_policy_generation": self.generation,
+            "sensor_frames": frames,
+        }
+
+    def observe(self, label: str) -> Observation:
+        started = time.monotonic()
+        images, frames = self.capture_images()
         generation = self.generation + 1
         sim_time = float(self.env.sim.current_time)
         self.freshness.accept(generation, sim_time, images, frames)
@@ -242,6 +271,11 @@ class XTrainerEmbodiment:
         wrist = target + self.base - self.math.quat_apply(self.reset_quat, self.offset)
         fingers = t.tensor([aperture_to_joints(float(row[6]))], device=self.device)
         command = t.cat((self.left_initial, wrist, self.reset_quat, fingers), dim=-1)
+        self.step_command(command)
+
+    def step_command(self, command: Any) -> None:
+        """Normal physics and invariant checks, also used by recorded-action replay."""
+        t = self.torch
         self.env.step(command)
         self.ticks += 1
         if not t.isfinite(self.robot.data.joint_pos).all():
@@ -262,6 +296,8 @@ class XTrainerEmbodiment:
             raise RuntimeError("joint_limit_reject")
         lift = float((self.env.scene["cube"].data.root_pos_w - self.initial_cube)[0, 2])
         self.max_lift = max(self.max_lift, lift)
+        if self.diagnostic_hook is not None:
+            self.diagnostic_hook(command)
 
     def initialize_settled_scene(self) -> None:
         """Hold the authored rest target while initial contacts settle."""
@@ -271,7 +307,11 @@ class XTrainerEmbodiment:
         self.initial_cube = self.env.scene["cube"].data.root_pos_w.clone()
         self.max_lift = 0.0
 
-    def execute(self, chunk: Any, observation: Observation) -> Observation:
+    def execute(
+        self, chunk: Any, observation: Observation, *, minimum_ticks: int = 1
+    ) -> Observation:
+        if minimum_ticks not in (1, 2):
+            raise ValueError("invalid_minimum_ticks")
         if observation is not self.current or self.consumed:
             raise ValueError("stale_observation")
         rows = np.array([action.data for action in chunk.actions], dtype=np.float64)
@@ -281,11 +321,12 @@ class XTrainerEmbodiment:
         self.consumed = True
         for row in rows:
             start = time.monotonic()
-            for _ in range(30):
+            for tick in range(30):
                 self.physics(row)
                 state = self.state()
                 if (
-                    np.linalg.norm(state[:3] - row[:3]) < 0.003
+                    tick + 1 >= minimum_ticks
+                    and np.linalg.norm(state[:3] - row[:3]) < 0.003
                     and np.linalg.norm(state[3:6]) < 0.035
                 ):
                     break
@@ -316,6 +357,12 @@ class XTrainerEmbodiment:
 
     def settle(self, target: np.ndarray) -> None:
         start = time.monotonic()
+        try:
+            self._settle(target)
+        finally:
+            self.timing["settle"] += time.monotonic() - start
+
+    def _settle(self, target: np.ndarray) -> None:
         # Hold target while fingers reach their setpoint/contact equilibrium.
         stable = 0
         for _ in range(120):
@@ -337,7 +384,6 @@ class XTrainerEmbodiment:
             raise RuntimeError("settle_timeout")
         if np.linalg.norm(self.state()[:3] - target[:3]) > 0.005:
             raise RuntimeError("post_settle_tracking_failure")
-        self.timing["settle"] += time.monotonic() - start
 
     def metrics(self) -> dict[str, Any]:
         from isaaclab.managers import SceneEntityCfg

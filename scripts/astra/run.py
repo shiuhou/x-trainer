@@ -13,9 +13,17 @@ from pathlib import Path
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("original", "smoke", "connect", "mission"), default="smoke"
+        "--mode",
+        choices=("original", "smoke", "connect", "mission", "diagnose"),
+        default="smoke",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--diagnostic-source", type=Path)
+    parser.add_argument("--diagnostic-case", choices=("raw", "cartesian", "height"))
+    parser.add_argument(
+        "--height-shift", type=float, choices=(-0.005, 0.0, 0.005), default=0.0
+    )
+    parser.add_argument("--slow-close", action="store_true")
     parser.add_argument("--provider-runtime", type=Path, default=Path("/opt/shared-s5"))
     parser.add_argument("--credential-file", type=Path)
     parser.add_argument(
@@ -75,6 +83,24 @@ def main() -> int:
                 im = env.scene[name].data.output["rgb"][0, ..., :3].cpu().numpy()
                 Image.fromarray(im).save(args.output / f"{name}.png")
             result["status"] = "ORIGINAL_BOOT_PASS"
+            return 0
+
+        if args.mode == "diagnose":
+            if not args.diagnostic_source or not args.diagnostic_case:
+                raise ValueError("diagnostic_source_and_case_required")
+            from leisaac.astra.diagnose import load_replay, run_diagnosis
+
+            episode = load_replay(env, args.diagnostic_source)
+            emb = XTrainerEmbodiment(env, args.output)
+            result["diagnosis"] = run_diagnosis(
+                emb,
+                episode,
+                args.diagnostic_source,
+                args.diagnostic_case,
+                height_shift=args.height_shift,
+                slow_close=args.slow_close,
+            )
+            result["status"] = "DIAGNOSE_COMPLETE"
             return 0
 
         emb = XTrainerEmbodiment(env, args.output, open_only=args.mode == "connect")
@@ -262,10 +288,6 @@ def main() -> int:
                     tools=observable_tools(policy),
                     blocked_io=guard.blocked,
                 )
-        if emb.current is not None:
-            # A distinct final capture requires a later simulation timestamp.
-            # Reuse the last post-motion image and label it honestly below.
-            result["final_image_generation"] = emb.generation
         result.update(
             evaluator=emb.metrics(),
             timing=emb.timing,
@@ -304,12 +326,14 @@ def main() -> int:
             )
             try:
                 result["evaluator"] = emb.metrics()
-                if emb.current:
-                    from PIL import Image
-
-                    for name, pixels in emb.current.images.items():
-                        Image.fromarray(pixels).save(args.output / f"final_{name}.png")
-                    result["final_image_generation"] = emb.generation
+                if "terminal_capture" in result.get("diagnosis", {}):
+                    result["final_capture"] = result["diagnosis"]["terminal_capture"]
+                else:
+                    result["final_capture"] = emb.diagnostic_capture(
+                        "failure_diagnostic"
+                        if result["status"] == "FAIL"
+                        else "final_diagnostic"
+                    )
             except Exception:
                 result["final_capture"] = "unavailable"
             for filename, records in (

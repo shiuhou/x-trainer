@@ -16,6 +16,9 @@ ARGS=(--rm --gpus all --shm-size=8g --cap-drop=ALL --cap-add=DAC_OVERRIDE --secu
   --mount "type=bind,source=$RUNTIME_DIR/s5,target=/opt/shared-s5,readonly"
   --workdir /workspace/x-trainer)
 LIVE_ARGS=()
+if [[ "$MODE" == diagnose ]]; then
+  ARGS+=(--network none)
+fi
 if [[ "$MODE" == connect || "$MODE" == mission ]]; then
   : "${ASTRA_CREDENTIAL_FILE:?Set ASTRA_CREDENTIAL_FILE to the operator credential file}"
   ARGS+=(--network host --mount "type=bind,source=$ASTRA_CREDENTIAL_FILE,target=/run/astra-relay.env,readonly")
@@ -57,7 +60,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--output', required=True)
 parsed, _ = parser.parse_known_args(args)
 result = json.loads((pathlib.Path(root) / parsed.output / 'result.json').read_text())
-expected = {'original': 'ORIGINAL_BOOT_PASS', 'smoke': 'SMOKE_PASS', 'connect': 'CONNECT_PASS', 'mission': 'MISSION_PASS'}
+expected = {'original': 'ORIGINAL_BOOT_PASS', 'smoke': 'SMOKE_PASS', 'connect': 'CONNECT_PASS', 'mission': 'MISSION_PASS', 'diagnose': 'DIAGNOSE_COMPLETE'}
 print(result['status'])
 raise SystemExit(0 if result['status'] == expected[mode] else 1)
 PY

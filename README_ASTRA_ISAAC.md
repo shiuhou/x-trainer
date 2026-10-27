@@ -7,7 +7,11 @@ The frozen MuJoCo S5 experiments remain a separate historical baseline.
 
 ## Validated checkpoint
 
-**Offline integration PASS; live connectivity BLOCKED; autonomous mission NOT RUN.**
+**Offline integration and live connectivity PASS; autonomous mission FAIL.**
+
+The subsequent bounded offline grasp investigation also remains **BLOCKED at
+stable closure**; it did not validate a full scripted pick/place. See the offline
+diagnosis section below. No additional paid episode was run.
 
 The original PickCube scene renders with the complete upstream assembly. The
 right-arm smoke moves up 4.989 mm and returns, closes and reopens the gripper,
@@ -200,8 +204,9 @@ mission. Re-running a live command is a new operator-authorized experiment.
 - `eef_state`: right-base grasp-center x/y/z in metres, measured reset-relative
   yaw/pitch/roll in radians, measured normalized opening (0 closed, 1 open).
 - Right base is the USD right pedestal frame at shared-base X=1.06 m. Grasp center
-  uses upstream PickCube's local wrist +Z160 mm convention, inside the authored
-  finger contact region. This is simulation geometry, not a measured real TCP.
+  uses upstream PickCube's local wrist +Z160 mm reference convention, not a
+  measured contact-pressure center or real TCP. The reference base is root-aligned
+  at (1.06,0,0); the USD shoulder-joint anchor is another 223.4 mm above it.
 - `move_to` / official ActionChunk targets contain `[x,y,z,yaw,pitch,roll,gripper]`.
   Only zero orientation targets are supported; Isaac Differential IK holds the
   reset orientation. The authored opposite finger joint targets are derived from
@@ -305,9 +310,122 @@ simulation episode was used for this analysis.
   cannot estimate relative success rates or establish identical upstream model
   weights through a relay.
 
-The smallest useful next investigation is zero-provider replay of the recorded
-approach/close, with bounded contact, finger pose and velocity diagnostics,
-followed by one-variable comparisons of grasp height and closure behavior. First
-establish a stable scripted grasp/lift with the original USD assembly; only then
-consider another paid autonomous episode. This investigation is proposed here,
-not executed, and historical evidence/physics/evaluator rules remain unchanged.
+The bounded zero-provider investigation below now executes that proposal.
+Historical evidence, physics parameters and evaluator rules remain unchanged.
+A stable scripted grasp/lift remains a prerequisite to a new autonomous trial.
+
+
+## Offline grasp diagnosis — stable closure BLOCKED
+
+Analysis baseline: `42c12d7990deb3494f5fe0c2a65d67b6b441bb58`.
+Local evidence is in `.agents/runs/xtrainer-astra/grasp-diagnosis/`, with one
+`comparison.json`, per-case collision geometry, compact physics/action traces,
+terminal diagnostic images, and upstream HDF5 recordings. The original
+`mission-1` input is read-only; its recording SHA256 remains
+`5e9da2dc4b00464358256c006402ff46dff6314af8212c8fd1e4fbc06c23b365`.
+
+**What was established:**
+
+- The upstream HDF5 reader and a single `reset_to(initial_state)` reproduce all
+  636 recorded 17-dimensional controls. There are no per-frame state writes.
+  Separately, the six recorded Cartesian destinations through the official
+  `move_to` interpolator and existing adapter reproduce the same failure.
+  Controls, robot joint positions/velocities, and cube poses/velocities are
+  element-for-element equal to `mission-1` in both replays (maximum difference 0).
+  The failure is not a replay-interface discrepancy.
+- An independent world-flange/quaternion/+160 mm reconstruction agrees with
+  the adapter's measured reference position to within 9.13e-8 m over the traces.
+  No coordinate-conversion defect was established. The old comment incorrectly
+  called (1.06,0,0) the shoulder anchor; it is the root-aligned pedestal reference.
+  This comment is corrected without changing the public frame or any target.
+- At original closure, the reference is about 54.9 mm above the cube center.
+  The distal collision tips start around world Z=138.0 mm, overlapping only
+  about 4.7 mm of the cube's upper edge. Collision vertices identify the narrow
+  distal finger region as wrist Z=168.292..197.000 mm; its geometric midpoint is
+  182.646 mm. This is a diagnostic target construction, **not a TCP replacement**
+  or a measured center of contact pressure. The public +160 mm offset stays fixed.
+- Aligning that region to the settled cube gives reference base Z=42.761 mm,
+  with candidates at 37.761/47.761 mm. Original approach XY, orientation, closure
+  endpoint and all physical settings remain fixed. Collision-mesh table
+  clearance predictions are positive (10.761/15.761/20.761 mm). These are mesh
+  surface clearances, not calibrated PhysX contact margins: the settled cube
+  bottom is about 7.5 mm above the table mesh, so actual contact/cooking behavior
+  remains a limitation of this measurement.
+- Original closure advances five interpolated commands in five control ticks
+  (about 0.167 s). At command zero, center-candidate measured aperture is still
+  0.5585. This command/readback lag justified exactly one comparison with two
+  ticks per closing waypoint (about 0.333 s), the same endpoint and unchanged
+  settle check. It also fails; slower closure is not adopted as a live fix.
+
+All statistics below cover the final 120 settle control steps. Existing limits
+remain joint speed <0.02 rad/s, cube linear speed <0.01 m/s and angular speed
+<0.1 rad/s for ten consecutive steps.
+
+| Case | Reference base Z (mm) | Cube speed (m/s), min–max | Angular speed (rad/s), min–max | Stable ticks |
+| --- | ---: | ---: | ---: | ---: |
+| Recorded controls / Cartesian replay | 75.000 | 0.0511–0.1598 | 2.480–10.049 | 0/120 |
+| Collision-derived center | 42.761 | 0.2233–0.2327 | 6.137–7.593 | 0/120 |
+| Center −5 mm | 37.761 | 0.1152–0.1319 | 11.857–12.889 | 0/120 |
+| Center +5 mm | 47.761 | 0.1456–0.3435 | 3.847–14.399 | 0/120 |
+| Center, closure playback ×2 | 42.761 | 0.3264–0.3341 | 11.411–11.793 | 0/120 |
+
+Every comparison stops at the first `settle_timeout` during closure. The
+upstream distance/joint heuristic becomes `grasped_now=true` in the height
+candidates, but **that does not demonstrate a physical grasp/lift**. Maximum
+incidental cube rise is only 0.214 mm. No lift, hold, transport, release/rest
+acceptance episode is run, because no candidate passes its unchanged prerequisite.
+The unexecuted full-task prototype is not shipped as a validated runner mode.
+
+**Unresolved cause:** persistent contact-state motion is measured, and changing
+height or closure ramp alone is insufficient. The exact source among cooked
+colliders, contact response and drive/solver dynamics is not isolated. PhysX
+reports that `J2_8` is authored as both a merged and standalone collision; that
+is a relevant warning, not proof of causation. Contact-pair identities and forces
+are explicitly `unavailable` in the unchanged asset reporting configuration.
+No collider, mass, friction, gain, solver, stability threshold or success rule
+was changed. Investigation stops at the agreed boundary, rather than guessing a
+physics fix or bypassing settle. Full scripted pick/place remains **NOT_RUN**.
+
+There were eight bounded launches, including two harness failures before any
+approach (missing optional HDF5 seed, and an Isaac 2.1 math API name mismatch).
+Both harness defects were fixed. Six comparative episodes completed: two
+reproductions, three heights and one slower closure. The raw replay then hit a
+NumPy-integer JSON serialization error after recording; its complete HDF5,
+physics trace and terminal images survive and were compared directly, without
+re-running that episode. Serialization now has a focused regression test.
+Each launch used an external 180 s timeout; completed Cartesian/candidate runner
+times were 31.99–32.79 s excluding Kit startup. No ninth launch was made.
+
+### Diagnostic entry point
+
+The same Astra runner has a credential-free `diagnose` branch. Its container
+uses `--network none`, no credential mount, and GPU devices only. It constructs
+no provider client. `DIAGNOSE_COMPLETE` means the experiment was recorded, **not**
+that grasping succeeded: inspect `diagnosis.outcome` and `diagnosis.failure`.
+The Cartesian/height cases specifically reconstruct the frozen `mission-1`
+six-destination approach; they are not a generic planner. Paths must be unique.
+
+```bash
+# Run from this component; these are future offline invocations, not permission
+# to exceed the completed investigation's eight-launch limit.
+timeout -k 10 180 scripts/astra/container.sh diagnose \
+  --diagnostic-source .agents/runs/xtrainer-astra/mission-1 \
+  --diagnostic-case raw \
+  --output .agents/runs/xtrainer-astra/new-diagnosis/raw
+# Other cases: --diagnostic-case cartesian
+# or --diagnostic-case height --height-shift {-0.005,0,0.005}
+# The single timing comparison additionally uses --slow-close.
+```
+
+Two production evidence defects are fixed: failed settle time is accumulated
+in `finally`, and failure images are rendered from the stopped terminal state.
+Diagnostic captures record simulation time, control ticks, sensor counters and
+last policy generation; they neither step physics nor create a policy observation.
+Privileged object/geometry data remains solely in diagnostic traces.
+
+Validation: **46 focused adapter tests PASS** (32 existing plus 14 new, with
+existing observation-isolation coverage extended), scoped Ruff/format, mypy,
+compilation and shell syntax PASS. The original live/provider behavior is
+unchanged. No MuJoCo or upstream-wide regression suite was rerun; no credentials
+were loaded, no provider calls/hardware connections were made, and nothing was
+pushed. A fresh paid Astra trial is not authorized by these offline results.

@@ -163,6 +163,14 @@ def test_model_observation_contains_only_images_and_measured_state(
     assert set(obs.images) == set(CAMERAS)
     assert obs.state_time == 0.1
     assert obs.instruction == emb.instruction
+    capture = emb.diagnostic_capture("failure_diagnostic")
+    assert capture["kind"] == "diagnostic_only"
+    assert capture["policy_usable"] is False
+    assert capture["sim_time"] == obs.state_time
+    assert capture["last_policy_generation"] == 1
+    assert emb.generation == 1 and len(emb.observation_trace) == 1
+    assert emb.current is obs
+    assert (tmp_path / "failure_diagnostic_montage.png").exists()
 
 
 @pytest.mark.parametrize("port", [7897, 18443])
@@ -416,3 +424,232 @@ def test_live_measured_aperture_does_not_reject_open_only_interpolation(
         {"targets": {"gripper": 0.99}, "note": "Invalid close."}
     )
     assert "fixed" in tools.execute(call, emb.current).error
+
+
+def test_diagnostic_collision_transform_uses_usd_row_convention():
+    from leisaac.astra.diagnose import transformed_points
+
+    transform = np.array([[0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 1, 0], [1, 2, 3, 1]])
+    points = np.array([[0.04, 0, 0.16]])
+    world = transformed_points(points, transform)
+    np.testing.assert_allclose(world, [[1, 2.04, 3.16]])
+    np.testing.assert_allclose(
+        transformed_points(world, np.linalg.inv(transform)), points, atol=1e-15
+    )
+
+
+@pytest.mark.parametrize("shape", [(17,), (1, 16), (1, 18), (0, 17)])
+def test_replay_rejects_wrong_control_dimensions(shape):
+    from leisaac.astra.diagnose import validate_replay_commands
+
+    with pytest.raises(ValueError, match="Nx17"):
+        validate_replay_commands(np.zeros(shape))
+
+
+def test_replay_accepts_only_finite_17d_controls():
+    from leisaac.astra.diagnose import validate_replay_commands
+
+    rows = np.zeros((2, 17))
+    validate_replay_commands(rows)
+    rows[-1, -1] = np.nan
+    with pytest.raises(ValueError, match="nonfinite"):
+        validate_replay_commands(rows)
+
+
+def test_failed_settle_time_is_accounted(monkeypatch):
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.timing = {"settle": 2.0}
+    clock = iter([10.0, 13.0])
+    monkeypatch.setattr("leisaac.astra.embodiment.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        emb,
+        "_settle",
+        lambda target: (_ for _ in ()).throw(RuntimeError("settle_timeout")),
+    )
+    with pytest.raises(RuntimeError, match="settle_timeout"):
+        emb.settle(np.zeros(7))
+    assert emb.timing["settle"] == 5.0
+
+
+@pytest.mark.parametrize("minimum_ticks", [1, 2])
+def test_closure_playback_duration_preserves_endpoint(monkeypatch, minimum_ticks):
+    from inspect_robots import Action, ActionChunk, Observation
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    target = np.array([0, 0, 0.2, 0, 0, 0, 0.0])
+    obs = Observation(state={"eef_state": target.copy()})
+    emb.current, emb.consumed = obs, False
+    emb.step_count, emb.closed_seen = 0, False
+    emb.action_trace, emb.observation_trace = [], []
+    emb.timing = {"execute": 0.0}
+    commands = []
+    monkeypatch.setattr(emb, "pre_check", lambda rows: None)
+    monkeypatch.setattr(emb, "state", lambda: target.copy())
+    monkeypatch.setattr(emb, "physics", lambda row: commands.append(row.copy()))
+    monkeypatch.setattr(emb, "settle", lambda row: None)
+    monkeypatch.setattr(emb, "observe", lambda label: obs)
+    emb.execute(ActionChunk([Action(target)]), obs, minimum_ticks=minimum_ticks)
+    assert len(commands) == minimum_ticks
+    for row in commands:
+        np.testing.assert_array_equal(row, target)
+
+
+def test_collision_support_ray_uses_surface_under_target():
+    from leisaac.astra.diagnose import surface_height
+
+    points = np.array(
+        [[0, 0, 0.1], [1, 0, 0.1], [0, 1, 0.1], [0, 0, 0.2], [1, 0, 0.2], [0, 1, 0.2]]
+    )
+    faces = np.array([[0, 1, 2], [3, 4, 5]])
+    assert surface_height(points, faces, np.array([0.2, 0.2]), 0.15) == pytest.approx(
+        0.1
+    )
+    assert surface_height(points, faces, np.array([0.2, 0.2]), 0.3) == pytest.approx(
+        0.2
+    )
+    with pytest.raises(ValueError, match="unavailable"):
+        surface_height(points, faces, np.array([2.0, 2.0]), 0.3)
+
+
+@pytest.mark.parametrize("recorded_seed,expected", [(None, 42), (19, 19)])
+def test_replay_restores_only_initial_state_and_closes_reader(
+    tmp_path, monkeypatch, recorded_seed, expected
+):
+    from types import SimpleNamespace
+    from leisaac.astra.diagnose import load_replay
+
+    calls = []
+    state = {"articulation": "recorded initial state"}
+    episode = SimpleNamespace(
+        seed=recorded_seed,
+        data={
+            "initial_state": state,
+            "actions": SimpleNamespace(
+                cpu=lambda: SimpleNamespace(numpy=lambda: np.zeros((2, 17)))
+            ),
+        },
+    )
+
+    class Reader:
+        def open(self, filename):
+            calls.append(("open", filename))
+
+        def load_episode(self, name, device):
+            return episode
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab.utils.datasets",
+        SimpleNamespace(HDF5DatasetFileHandler=Reader),
+    )
+    env = SimpleNamespace(
+        device="cpu",
+        cfg=SimpleNamespace(seed=42),
+        seed=lambda value: calls.append(("seed", value)),
+        sim=SimpleNamespace(reset=lambda: calls.append(("sim_reset",))),
+        recorder_manager=SimpleNamespace(
+            reset=lambda: calls.append(("recorder_reset",))
+        ),
+        reset_to=lambda value, ids, is_relative: calls.append(
+            ("reset_to", value, ids, is_relative)
+        ),
+    )
+    assert load_replay(env, tmp_path) is episode
+    assert [c[0] for c in calls] == [
+        "open",
+        "close",
+        "seed",
+        "sim_reset",
+        "recorder_reset",
+        "reset_to",
+    ]
+    assert calls[2] == ("seed", expected)
+    assert calls[-1] == ("reset_to", state, None, True)
+
+
+def test_offline_move_uses_official_interpolation_and_existing_validation(monkeypatch):
+    from types import SimpleNamespace
+    from inspect_robots import Observation, ObservationSpace, StateSpec, StateField
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+    from leisaac.astra.diagnose import move
+
+    current = np.array([-0.55, 0, 0.05, 0, 0, 0, 1.0])
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.limits, emb.open_only = Limits(), False
+    emb.current = Observation(state={"eef_state": current})
+    emb.info = SimpleNamespace(
+        control_hz=10.0,
+        observation_space=ObservationSpace(
+            state=StateSpec((StateField("eef_state", (7,)),))
+        ),
+    )
+    validated, executed = [], []
+
+    def check(rows):
+        emb.limits.validate(np.asarray(rows), current)
+        validated.append(rows)
+        return None
+
+    monkeypatch.setattr(emb, "pre_check", check)
+    monkeypatch.setattr(
+        emb,
+        "execute",
+        lambda chunk, obs, **kwargs: executed.append((chunk, obs, kwargs)),
+    )
+    target = current.copy()
+    target[2] += 0.01
+    target[6] = 0
+    move(emb, target, minimum_ticks=2)
+    assert len(validated) == len(executed) == 1
+    chunk, observation, kwargs = executed[0]
+    assert len(chunk.actions) > 1
+    steps = np.diff(
+        np.vstack([current, *[action.data for action in chunk.actions]]), axis=0
+    )
+    assert np.abs(steps[:, 6]).max() <= 0.2
+    np.testing.assert_allclose(chunk.actions[-1].data, target)
+    assert observation is emb.current and kwargs == {"minimum_ticks": 2}
+
+
+def test_raw_diagnosis_result_serializes_numpy_stability_without_advancing_terminal(
+    tmp_path, monkeypatch
+):
+    import json
+    from types import SimpleNamespace
+    from leisaac.astra import diagnose
+
+    (tmp_path / "episode.hdf5").write_bytes(b"synthetic fixture")
+    samples, captures = [], []
+
+    class Trace:
+        def __init__(self, emb):
+            self.samples = samples
+            self.phase = "initial"
+
+        def save(self):
+            pass
+
+    monkeypatch.setattr(diagnose, "Diagnostics", Trace)
+
+    def step(command):
+        samples.append({"joint_vel": [0.0] * 8, "cube_state_w": [0.0] * 13})
+
+    emb = SimpleNamespace(
+        observe=lambda label: None,
+        step_command=step,
+        diagnostic_capture=lambda label: captures.append(len(samples))
+        or {"policy_usable": False},
+    )
+    result = diagnose.run_diagnosis(
+        emb, SimpleNamespace(data={"actions": np.zeros((130, 17))}), tmp_path, "raw"
+    )
+    assert json.loads(json.dumps(result))["terminal_stable_ticks"] == 120
+    assert result["outcome"] == "recorded_settled"
+    assert captures[-1] == 130 and len(samples) == 130
+    assert emb.diagnostic_hook is None
