@@ -248,3 +248,66 @@ There is no requirement for bit-exact GPU frames or a MuJoCo regression campaign
 
 Camera extrinsics and FOV are engineering placements, not measured calibration.
 This is not a real-robot safety certificate or a sim-to-real success claim.
+
+## Comparison with the successful MuJoCo block-to-box episode
+
+This is a retrospective analysis of the frozen MuJoCo evidence
+`nova_mujoco/evidence/sim_s5b/20261011T040204Z-postfix-live/` and Isaac
+`mission-1/`, not a controlled engine comparison. No new model request or
+simulation episode was used for this analysis.
+
+- **Different starting difficulty:** MuJoCo's initial grasp-center XY was
+  (-0.30,-0.15) m, exactly the blue block's XY. Isaac's initial horizontal
+  grasp-center-to-cube offset was 239.1 mm, calculated in world coordinates from
+  recorded EEF, the right-base translation and the recorded robot root pose.
+  The Isaac policy spent five decisions approaching before its first close.
+- **Different object/contact models:** the frozen MuJoCo scene used a 60 mm,
+  100 g primitive cube and simplified box-pad gripper (197 mm nominal grasp
+  offset, 95 mm maximum opening). Read-only USD inspection gives the Isaac cube
+  45 mm visual bounds and 10 g authored mass; its gripper is the upstream USD
+  assembly, with the upstream 160 mm grasp convention. MuJoCo finger position
+  drives have kp=2500 and an 8 N per-finger force range; Isaac's upstream
+  implicit gripper configuration has stiffness=400, damping=40 and effort
+  limit=50. These are different contact/control configurations, not evidence
+  that one engine is inherently better. Contact force traces for the Isaac
+  failure were not recorded, so actual applied force cannot be inferred from
+  the configured limit.
+- **Grasp-height hypothesis:** at the last pre-close observation, the Isaac
+  nominal grasp center was world (0.510010,-0.000014,0.175007) m; the cube center
+  was approximately (0.505529,-0.002233,0.120115) m. Horizontal difference was
+  about 5.0 mm but vertical difference 54.9 mm. The last completed close waypoint
+  tracked its commanded center within 0.444 mm (all completed waypoints under
+  3 mm). Thus Cartesian tracking passed while the intended contact pose may
+  have been inappropriate. The 160 mm reference point is not proof that the
+  fingertips' usable contact area coincides with it. Height/contact geometry
+  needs an isolated offline check; this evidence alone does not prove a frame
+  bug or justify substituting a different TCP value.
+- **Different continuation rule:** MuJoCo held each chunk for a bounded
+  gripper-travel-derived duration plus 0.25 s and returned fresh observations;
+  object `settled=false` did not automatically terminate intermediate decisions.
+  That episode briefly lifted/dropped the block, reopened/reapproached and
+  regrasped, then succeeded after 10 decisions/188 waypoints, with maximum lift
+  143.8 mm and `dropped_observed=true`. Isaac requires ten consecutive stable
+  robot/object ticks within 120 control steps after every chunk. Persistent
+  motion on the first close triggered an abort before a fresh failure-state
+  observation/replan. This does not prove that allowing continuation would
+  have succeeded, and is not permission to weaken safety or final evaluation.
+- **Different success definitions:** MuJoCo tests geometric inclusion in the box,
+  release and settling (including distractor checks). Upstream Isaac tests a
+  plate-relative region and return to rest; the adapter additionally requires
+  release/settling. This difference did not cause the observed early failure:
+  Isaac never reached lift or placement. Upstream `object_grasped` is a
+  center-distance/joint-position heuristic, not a contact-force detector.
+- **Visual and statistical limits:** both expose three RGBs and EEF, but camera
+  poses, lighting, backgrounds, object scale and gripper appearance differ.
+  Wrist images show successive visual corrections, not a total failure to
+  locate the cube. One successful MuJoCo episode and one failed Isaac episode
+  cannot estimate relative success rates or establish identical upstream model
+  weights through a relay.
+
+The smallest useful next investigation is zero-provider replay of the recorded
+approach/close, with bounded contact, finger pose and velocity diagnostics,
+followed by one-variable comparisons of grasp height and closure behavior. First
+establish a stable scripted grasp/lift with the original USD assembly; only then
+consider another paid autonomous episode. This investigation is proposed here,
+not executed, and historical evidence/physics/evaluator rules remain unchanged.
