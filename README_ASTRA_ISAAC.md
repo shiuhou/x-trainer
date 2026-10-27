@@ -16,18 +16,35 @@ through two mock Responses requests, `move_to`, interpolation and Isaac executio
 six total smoke waypoints, 98 recorded physics steps, generations 1 through 6.
 This is offline evidence, not a live Astra success.
 
-The first live initialization stopped before transmission because package
-metadata was missing. Installing the exact archived packages fixed it, and the
-offline official-agent loop then passed. The subsequent live transport attempt
-was refused by the configured local proxy (errno 111, no listener), before relay
-HTTP transmission: **0 transmitted requests, 0 decisions, 0 model tokens reported**.
-No automatic network retry or mission was performed. Resume requires restoring
-the existing operator proxy and authorizing a new bounded connectivity run.
+The first live initialization lacked package metadata (fixed). A subsequent
+attempt found no listener on the previous proxy, before transmission. After the
+operator changed the proxy, the bounded connectivity run received **two real
+HTTP 200 Responses, one returned policy decision, zero executed waypoints**.
+Both model `move_to` calls were rejected by the open-only gripper check; the
+agent then exhausted its two-call budget and returned a synthetic stop. This is
+**live FAIL, not a transport failure or mission success**. The relay reported
+`gpt-6-astra`; total usage was 59,687 tokens and episode time 29.421 seconds.
+No further paid run or autonomous mission was performed.
 
-Only the new adapter checks were run: 11 focused tests, Ruff, formatting, mypy,
-Python compilation and shell syntax passed. No MuJoCo regression campaign,
-physical device access or push was performed. GUI keyboard launch is provided
-but has not been exercised interactively.
+Offline reproduction identified the adapter defect: measured opening
+`0.9999999511267113` produced interpolated commands slightly below 1, which
+violated the connectivity-only exact-open check. The connectivity action space
+now pins gripper low/high to 1; official interpolation therefore emits open
+commands, while observation still reports measured aperture. Mission gripper
+bounds remain 0..1. Neither validation tolerance nor the official agent changed.
+Both original tool targets reproduce the rejection with the old space and pass
+with the corrected space. Closing commands remain rejected in connectivity mode.
+
+The updated Isaac smoke passed: two mock Responses calls through the open-only
+contract, six total waypoints, generations 1..6, 98 recorded physics steps,
+10.698 seconds. This is offline validation; it does not turn the failed live run
+into a PASS. A new paid connectivity experiment needs a new request budget.
+
+Scoped validation: 32 adapter tests, Ruff, formatting, mypy (six owned modules,
+`--follow-imports=skip --ignore-missing-imports`), compilation and shell syntax
+passed. No MuJoCo render/regression campaign or physical access was performed.
+The shared S5 provider's focused suite separately passed 100 tests. GUI keyboard
+launch is provided but has not been exercised interactively.
 
 Local evidence under `.agents/runs/xtrainer-astra/`:
 
@@ -35,6 +52,8 @@ Local evidence under `.agents/runs/xtrainer-astra/`:
 - `offline-agent/`: final offline smoke, actions, frames, recording and metrics.
 - `connect/`: preserved zero-request installation failure.
 - `connect-live/`: preserved proxy failure, initial images and transport accounting.
+- `connect-configured-proxy/`: preserved two-response live failure, original measured state and targets.
+- `offline-open-contract/`: corrected open-only official-agent smoke, recording and fresh frames.
 - `smoke-tracking/`: uncompensated IK failure for comparison.
 
 ## Runtime
@@ -75,13 +94,38 @@ scripts/astra/container.sh keyboard
 scripts/astra/container.sh original --output .agents/runs/xtrainer-astra/original
 scripts/astra/container.sh smoke --output .agents/runs/xtrainer-astra/smoke
 
-# Set ASTRA_CREDENTIAL_FILE to the existing operator env file in your shell.
-# It is mounted read-only only for live modes; never source it or put its value
-# into Docker environment variables, command arguments, images or evidence.
+# Set ASTRA_CREDENTIAL_FILE to the existing operator env-file path.
+# Default proxy selection is automatic; no port number is embedded in this command.
 scripts/astra/container.sh connect --output .agents/runs/xtrainer-astra/connect
 scripts/astra/container.sh mission --connect-result .agents/runs/xtrainer-astra/connect/result.json \
   --output .agents/runs/xtrainer-astra/mission
 ```
+
+`--provider-proxy auto` (default) selects a working local HTTP(S) proxy before
+launching Isaac. It tries `S5_PROVIDER_HTTPS_PROXY`, then the standard
+HTTPS/ALL/HTTP proxy environment settings, then GNOME's saved HTTPS/HTTP proxy
+addresses. Desktop addresses are candidates even with the global desktop proxy
+toggle off: this application's auto mode verifies them independently. Stale
+candidates are skipped. There is no fixed port list and no scan of unrelated
+listening services. CONNECT/TLS is checked with a bounded, credential-free HEAD
+to the relay root, never a model request. Current host auto-selection and TLS
+verification passed without supplying a port on the command line.
+
+For an explicit override use `--provider-proxy http://localhost:<port>` (or an
+IPv6 loopback URL); every valid TCP port is accepted. HTTP/HTTPS default ports
+also work. Explicit URLs do not silently switch. `--provider-proxy direct`
+selects direct routing with the existing public-address guard. The chosen route
+is fixed for the episode; transport retries remain disabled. If no configured
+candidate works, selection stops before paid requests.
+
+The host resolves desktop configuration and passes only the selected address to
+the container. `run.py` can also resolve auto mode from its own environment.
+Proxy credentials and non-loopback proxy destinations are not supported. Socket
+isolation still applies outside provider transport; it is not a fixed proxy-port
+allowlist. The HTTP client still has `trust_env=False`: environment settings are
+validated and selected explicitly, never blindly inherited by the client.
+Credentials are parsed as data from a read-only mount, never sourced or copied
+into Docker environment variables, command arguments, images or evidence.
 
 Live modes are paid. `connect` permits two requests/two decisions/180 seconds;
 `mission` requires a prior connect PASS and permits twelve requests/twelve
@@ -121,7 +165,11 @@ mission. Re-running a live command is a new operator-authorized experiment.
   recorded and required by this runner. Model `done` alone is not success.
 
 Provider construction, credentials, endpoint/proxy guard, request accounting and
-metadata redaction directly reuse frozen S5 `s5_agent.py` / `s5_common.py`.
+metadata redaction reuse frozen S5 `s5_agent.py` / `s5_common.py` with the
+reviewable `scripts/astra/provider-proxy.patch` applied by setup. The patch adds
+the same configuration selection and loopback route validation as the local S5
+provider code, without a fixed proxy port. Network audit
+enforcement and frozen MuJoCo experiment evidence are preserved.
 They load the official `inspect-robots-agent` at
 `7e506e3b6f39530f18e75cf97b23c4287aa90f12`; no MuJoCo simulator or real-motion
 backend is imported. Responses serialization, parsing and interpolation stay

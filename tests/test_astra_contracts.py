@@ -163,3 +163,256 @@ def test_model_observation_contains_only_images_and_measured_state(
     assert set(obs.images) == set(CAMERAS)
     assert obs.state_time == 0.1
     assert obs.instruction == emb.instruction
+
+
+@pytest.mark.parametrize("port", [7897, 18443])
+def test_proxy_port_is_configured_and_guard_remains_scoped(monkeypatch, port):
+    runtime = (
+        Path(__file__).resolve().parents[1] / ".agents/runs/xtrainer-astra/runtime/s5"
+    )
+    monkeypatch.syspath_prepend(str(runtime))
+    from s5_agent import SimulationIOGuard
+    from s5_common import APPROVED_RELAY, S5Error
+
+    guard = SimulationIOGuard(APPROVED_RELAY, proxy=f"http://127.0.0.1:{port}")
+    with pytest.raises(S5Error, match="prohibited_io"):
+        guard.check("socket.connect", (None, ("127.0.0.1", port)))
+    with guard.provider_network():
+        guard.check("socket.connect", (None, ("127.0.0.1", port)))
+        for address in [
+            ("127.0.0.1", port + 1),
+            ("172.10.10.100", port),
+            ("198.18.0.65", 443),
+        ]:
+            with pytest.raises(S5Error, match="prohibited_io"):
+                guard.check("socket.connect", (None, address))
+        with pytest.raises(S5Error, match="prohibited_io"):
+            guard.check("socket.bind", (None, ("127.0.0.1", port)))
+    assert not guard.active
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:65536",
+        "http://127.0.0.1:0",
+        "http://172.10.10.100:7897",
+        "http://127.0.0.1:7897/other",
+    ],
+)
+def test_proxy_rejects_ambiguous_or_unapproved_destination(monkeypatch, url):
+    runtime = (
+        Path(__file__).resolve().parents[1] / ".agents/runs/xtrainer-astra/runtime/s5"
+    )
+    monkeypatch.syspath_prepend(str(runtime))
+    from s5_agent import SimulationIOGuard
+    from s5_common import APPROVED_RELAY, S5Error
+
+    with pytest.raises(S5Error, match="invalid_provider_configuration"):
+        SimulationIOGuard(APPROVED_RELAY, proxy=url)
+
+
+@pytest.fixture
+def provider(monkeypatch):
+    runtime = (
+        Path(__file__).resolve().parents[1] / ".agents/runs/xtrainer-astra/runtime/s5"
+    )
+    monkeypatch.syspath_prepend(str(runtime))
+    import s5_common
+
+    return s5_common
+
+
+@pytest.mark.parametrize("port", [1, 80, 443, 21349, 65535])
+def test_any_valid_proxy_port_is_supported(provider, port):
+    assert (
+        provider.validate_provider_proxy(
+            provider.APPROVED_RELAY, f"http://localhost:{port}"
+        )
+        == f"http://127.0.0.1:{port}"
+    )
+
+
+def test_auto_selects_working_desktop_proxy_after_stale_config(provider, monkeypatch):
+    monkeypatch.setattr(
+        provider, "desktop_provider_proxies", lambda: ["http://localhost:24138"]
+    )
+    attempts = []
+
+    def preflight(base, proxy):
+        attempts.append(proxy)
+        return proxy.endswith(":24138")
+
+    monkeypatch.setattr(provider, "provider_proxy_preflight", preflight)
+    env = {"S5_PROVIDER_HTTPS_PROXY": "http://127.0.0.1:21349"}
+    assert (
+        provider.select_provider_proxy(provider.APPROVED_RELAY, env)
+        == "http://127.0.0.1:24138"
+    )
+    assert attempts == ["http://127.0.0.1:21349", "http://127.0.0.1:24138"]
+
+
+def test_auto_selects_standard_environment_and_deduplicates(provider, monkeypatch):
+    monkeypatch.setattr(provider, "desktop_provider_proxies", lambda: [])
+    attempts = []
+
+    def preflight(base, proxy):
+        attempts.append(proxy)
+        return proxy.endswith(":24300")
+
+    monkeypatch.setattr(provider, "provider_proxy_preflight", preflight)
+    env = {
+        "S5_PROVIDER_HTTPS_PROXY": "http://localhost:24301",
+        "HTTPS_PROXY": "http://127.0.0.1:24301",
+        "HTTP_PROXY": "http://localhost:24300",
+    }
+    assert provider.select_provider_proxy(provider.APPROVED_RELAY, env).endswith(
+        ":24300"
+    )
+    assert len(attempts) == 2
+
+
+def test_auto_never_probes_hardware_or_exposes_invalid_proxy_credentials(
+    provider, monkeypatch
+):
+    monkeypatch.setattr(provider, "desktop_provider_proxies", lambda: [])
+    monkeypatch.setattr(
+        provider, "provider_proxy_preflight", lambda *a: pytest.fail("unsafe preflight")
+    )
+    with pytest.raises(provider.S5Error) as error:
+        provider.select_provider_proxy(
+            provider.APPROVED_RELAY,
+            {
+                "HTTPS_PROXY": "http://user:synthetic-secret@127.0.0.1:21349",
+                "HTTP_PROXY": "http://172.10.10.100:29999",
+            },
+        )
+    assert "synthetic-secret" not in str(error.value)
+    assert error.value.category == "proxy_connect"
+
+
+def test_explicit_or_direct_selection_does_not_discover_or_switch(
+    provider, monkeypatch
+):
+    monkeypatch.setattr(
+        provider,
+        "desktop_provider_proxies",
+        lambda: pytest.fail("unrequested discovery"),
+    )
+    assert (
+        provider.select_provider_proxy(
+            provider.APPROVED_RELAY, {}, "http://localhost:21349"
+        )
+        == "http://127.0.0.1:21349"
+    )
+    assert provider.select_provider_proxy(provider.APPROVED_RELAY, {}, "direct") is None
+
+
+def test_preflight_is_credential_free_head_not_model_request(provider, monkeypatch):
+    from types import SimpleNamespace
+
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="403 0")
+
+    monkeypatch.setattr(provider.subprocess, "run", run)
+    assert provider.provider_proxy_preflight(
+        provider.APPROVED_RELAY, "http://localhost:21349"
+    )
+    command = commands[0]
+    assert command[:2] == ["curl", "-q"]
+    assert "--head" in command and "--insecure" not in command
+    assert "--location" not in command
+    assert command[-1] == provider.APPROVED_RELAY + "/"
+    assert all(
+        "authorization" not in word.lower() and "responses" not in word
+        for word in command
+    )
+
+
+@pytest.mark.parametrize("result", [(1, "200 0"), (0, "000 0"), (0, "200 60")])
+def test_failed_connect_or_tls_is_not_selected(provider, monkeypatch, result):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        provider.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=result[0], stdout=result[1]),
+    )
+    assert not provider.provider_proxy_preflight(
+        provider.APPROVED_RELAY, "http://localhost:21349"
+    )
+
+
+@pytest.mark.parametrize("explicit_pose", [False, True])
+def test_live_measured_aperture_does_not_reject_open_only_interpolation(
+    monkeypatch, explicit_pose
+):
+    import json
+    from types import SimpleNamespace
+    from inspect_robots import Observation, ObservationSpace, StateSpec, StateField
+    from inspect_robots_agent._tools import build_toolset
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+
+    # Measured first live frame and its two model target variants. No simulator
+    # ground truth or fabricated perfect gripper reading is supplied to the tool.
+    state = np.array(
+        [
+            -0.3449961543083191,
+            -0.11750148236751556,
+            0.25565552711486816,
+            1.7484556025237907e-7,
+            8.931510819820687e-8,
+            2.513934127534867e-8,
+            0.9999999511267113,
+        ]
+    )
+    original = state.copy()
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.limits = Limits(chunk_path_m=0.01, max_waypoints=32)
+    emb.current = Observation(state={"eef_state": state})
+    emb.consumed = False
+    emb.pre_check_rejections = []
+    emb.timing = {"validation": 0.0}
+    monkeypatch.setattr(emb, "state", lambda: state)
+    obs_space = ObservationSpace(
+        state=StateSpec((StateField("eef_state", (7,), "m,rad,normalized"),))
+    )
+    targets = (
+        {
+            "x": state[0],
+            "y": -0.11750148981809616,
+            "z": state[2] + 0.005,
+            "yaw": 0,
+            "pitch": 0,
+            "roll": 0,
+            "gripper": 1,
+        }
+        if explicit_pose
+        else {"z": 0.2607, "gripper": 1}
+    )
+    call = SimpleNamespace(
+        name="move_to",
+        arguments=json.dumps(
+            {"targets": targets, "note": "Offline reproduction of observed target."}
+        ),
+    )
+    emb.open_only = False
+    old_space = emb.action_space()
+    emb.open_only = True
+    old_tools = build_toolset(old_space, obs_space, 10.0, pre_check=emb.pre_check)
+    assert (
+        old_tools.execute(call, emb.current).error
+        == "pre-check rejected this motion: connectivity_requires_open_gripper"
+    )
+    tools = build_toolset(emb.action_space(), obs_space, 10.0, pre_check=emb.pre_check)
+    result = tools.execute(call, emb.current)
+    assert result.error is None and result.chunk is not None
+    assert all(action.data[6] == 1 for action in result.chunk.actions)
+    np.testing.assert_array_equal(state, original)
+    call.arguments = json.dumps(
+        {"targets": {"gripper": 0.99}, "note": "Invalid close."}
+    )
+    assert "fixed" in tools.execute(call, emb.current).error

@@ -66,6 +66,7 @@ class XTrainerEmbodiment:
         self.freshness = Freshness()
         self.observation_trace: list[dict[str, Any]] = []
         self.action_trace: list[dict[str, Any]] = []
+        self.pre_check_rejections: list[str] = []
         self.timing = {
             key: 0.0 for key in ("render", "validation", "execute", "settle")
         }
@@ -81,19 +82,7 @@ class XTrainerEmbodiment:
         self.configure_views()
         self.info = EmbodimentInfo(
             name="xtrainer_isaac_right_simulation",
-            action_space=Box(
-                shape=(7,),
-                low=np.array([*self.limits.low, 0, 0, 0, 0]),
-                high=np.array([*self.limits.high, 0, 0, 0, 1]),
-                semantics=ActionSemantics(
-                    control_mode="eef_abs_pose",
-                    rotation_repr="none",
-                    frame="base",
-                    gripper="continuous",
-                    dim_labels=LABELS,
-                    max_step=(0.005, 0.005, 0.005, None, None, None, 0.2),
-                ),
-            ),
+            action_space=self.action_space(),
             observation_space=ObservationSpace(
                 cameras=tuple(
                     CameraSpec(name, shape[0], shape[1])
@@ -121,6 +110,35 @@ class XTrainerEmbodiment:
                     if open_only
                     else ""
                 )
+            ),
+        )
+
+    def action_space(self) -> Box:
+        """Pin open-only commands in the official tool's interpolation space.
+
+        Measured aperture stays measured. The tool clips intermediate commands
+        to this fixed bound, so tiny contact/float residuals cannot command a
+        partial close during an open-only connectivity check.
+        """
+        return Box(
+            shape=(7,),
+            low=np.array([*self.limits.low, 0, 0, 0, 1 if self.open_only else 0]),
+            high=np.array([*self.limits.high, 0, 0, 0, 1]),
+            semantics=ActionSemantics(
+                control_mode="eef_abs_pose",
+                rotation_repr="none",
+                frame="base",
+                gripper="continuous",
+                dim_labels=LABELS,
+                max_step=(
+                    0.005,
+                    0.005,
+                    0.005,
+                    None,
+                    None,
+                    None,
+                    None if self.open_only else 0.2,
+                ),
             ),
         )
 
@@ -212,6 +230,7 @@ class XTrainerEmbodiment:
             if self.open_only and np.any(np.abs(rows[:, 6] - 1) > 1e-8):
                 raise ValueError("connectivity_requires_open_gripper")
         except ValueError as exc:
+            self.pre_check_rejections.append(str(exc))
             return str(exc)
         finally:
             self.timing["validation"] += time.monotonic() - started

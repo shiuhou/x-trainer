@@ -20,6 +20,21 @@ if [[ "$MODE" == connect || "$MODE" == mission ]]; then
   : "${ASTRA_CREDENTIAL_FILE:?Set ASTRA_CREDENTIAL_FILE to the operator credential file}"
   ARGS+=(--network host --mount "type=bind,source=$ASTRA_CREDENTIAL_FILE,target=/run/astra-relay.env,readonly")
   LIVE_ARGS=(--provider-runtime /opt/shared-s5 --credential-file /run/astra-relay.env)
+  # Resolve on the host, where desktop proxy settings are available. The child
+  # receives only a validated address, never credential contents or ambient proxies.
+  PROVIDER_PROXY=$(python3 - "$RUNTIME_DIR/s5" "$ASTRA_CREDENTIAL_FILE" "$@" <<'PY'
+import argparse, os, pathlib, sys
+runtime, credential_file, *args = sys.argv[1:]
+sys.path.insert(0, runtime)
+from s5_common import APPROVED_RELAY, parse_env_file, select_provider_proxy
+parser = argparse.ArgumentParser()
+parser.add_argument('--provider-proxy', default='auto')
+selected, _ = parser.parse_known_args(args)
+env = {**parse_env_file(pathlib.Path(credential_file)), **os.environ}
+print(select_provider_proxy(APPROVED_RELAY, env, selected.provider_proxy) or 'direct')
+PY
+)
+  LIVE_ARGS+=(--provider-proxy "$PROVIDER_PROXY")
 fi
 if [[ "$MODE" == keyboard ]]; then
   : "${DISPLAY:?A local graphical display is required}"
@@ -32,7 +47,7 @@ if [[ "$MODE" == keyboard ]]; then
     --teleop_device bi_keyboard --num_envs 1 --device cuda --enable_cameras --multi_view "$@"
 fi
 docker run "${ARGS[@]}" --entrypoint /isaac-sim/python.sh "$IMAGE" \
-  scripts/astra/run.py --mode "$MODE" --headless --enable_cameras "${LIVE_ARGS[@]}" "$@"
+  scripts/astra/run.py --mode "$MODE" --headless --enable_cameras "$@" "${LIVE_ARGS[@]}"
 # Kit fast shutdown can return zero after a Python failure. Require the actual
 # experiment result, which must exist and pass; never mistake process exit for PASS.
 python3 - "$ROOT_DIR" "$MODE" "$@" <<'PY'

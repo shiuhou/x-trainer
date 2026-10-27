@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--provider-runtime", type=Path, default=Path("/opt/shared-s5"))
     parser.add_argument("--credential-file", type=Path)
+    parser.add_argument(
+        "--provider-proxy",
+        default="auto",
+        help="auto, direct, or a local HTTP(S) proxy URL",
+    )
     parser.add_argument("--connect-result", type=Path)
     parser.add_argument("--model", choices=("gpt-6-astra",), default="gpt-6-astra")
     from isaaclab.app import AppLauncher
@@ -102,9 +108,16 @@ def main() -> int:
             # Exercise official package metadata, observation serialization,
             # move_to and interpolation without any network or credential.
             sys.path.insert(0, str(args.provider_runtime.resolve()))
+            from dataclasses import replace
+            from leisaac.astra.contracts import Limits
             from s5_agent import make_replay_policy
             from s5_common import Budget, RunLimits
 
+            # Exercise the exact open-only connectivity contract after the
+            # independent manual gripper smoke, with measured aperture intact.
+            emb.open_only = True
+            emb.limits = Limits(chunk_path_m=0.01, max_waypoints=32)
+            emb.info = replace(emb.info, action_space=emb.action_space())
             replay_budget = Budget(RunLimits())
             replay_policy, replay_transport = make_replay_policy(emb, replay_budget)
             try:
@@ -134,7 +147,6 @@ def main() -> int:
             # two modules do not import or construct a MuJoCo or hardware backend.
             from s5_common import (
                 APPROVED_RELAY,
-                APPROVED_PROXY,
                 Budget,
                 RunLimits,
                 BenchmarkRunLimits,
@@ -142,13 +154,18 @@ def main() -> int:
                 register_credentials,
                 install_log_redaction,
                 wall_deadline,
+                select_provider_proxy,
+                S5Error,
             )
             from s5_agent import SimulationIOGuard, make_live_policy, observable_tools
 
             credentials = parse_env_file(args.credential_file)
             register_credentials(credentials)
             install_log_redaction()
-            credentials["S5_PROVIDER_HTTPS_PROXY"] = APPROVED_PROXY
+            proxy = select_provider_proxy(
+                APPROVED_RELAY, {**credentials, **os.environ}, args.provider_proxy
+            )
+            credentials["S5_PROVIDER_HTTPS_PROXY"] = proxy or ""
             connect = args.mode == "connect"
             limits = (
                 RunLimits(
@@ -161,7 +178,7 @@ def main() -> int:
                 else BenchmarkRunLimits(max_episode_steps=384)
             )
             budget = Budget(limits)
-            guard = SimulationIOGuard(APPROVED_RELAY, proxy=APPROVED_PROXY)
+            guard = SimulationIOGuard(APPROVED_RELAY, proxy=proxy)
             instruction = (
                 "Simulation connectivity check: use move_to to move the observed grasp center 0.005 m up in base Z with gripper=1; "
                 "after the new observation, move 0.005 m down with gripper=1. Keep X/Y and orientation unchanged."
@@ -196,8 +213,14 @@ def main() -> int:
                         if any(
                             action.meta.get("request_stop") for action in chunk.actions
                         ):
-                            raise RuntimeError(
-                                "policy_stopped_before_evaluator_success"
+                            result["policy_stop"] = {
+                                "request_budget_exhausted": budget.requests
+                                >= limits.max_llm_calls,
+                                "pre_check_rejections": emb.pre_check_rejections,
+                            }
+                            raise S5Error(
+                                "policy_output",
+                                "policy_stopped_before_evaluator_success",
                             )
                         budget.check_steps(len(chunk.actions))
                         before = obs.state["eef_state"][:3].copy()
