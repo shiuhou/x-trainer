@@ -27,6 +27,8 @@ from .contracts import (
     Limits,
     aperture_to_joints,
     measured_aperture,
+    measured_motion,
+    settling_sample_valid,
 )
 
 
@@ -34,7 +36,7 @@ class XTrainerEmbodiment:
     def __init__(self, env: Any, output: Path, *, open_only: bool = False):
         import torch
         from isaaclab.utils import math as math_utils
-        from .task import RIGHT_BASE_IN_ROOT, GRASP_IN_WRIST
+        from .task import RIGHT_BASE_IN_ROOT, GRASP_IN_WRIST, GRIPPING_REGION_WRIST_Z
 
         self.torch, self.math, self.env = torch, math_utils, env
         self.robot = env.scene["robot"]
@@ -97,6 +99,9 @@ class XTrainerEmbodiment:
             docs=(
                 "Simulation only. Control ONLY the right arm; left arm remains at rest. "
                 "move_to is absolute grasp-center position in metres in the right arm base frame. "
+                "Here grasp-center denotes the upstream wrist +Z160 mm reference, not the physical contact midpoint. "
+                f"The narrow finger gripping region spans wrist Z={GRIPPING_REGION_WRIST_Z} metres; "
+                "its midpoint is approximately 22.646 mm below the reported reference in base Z at the fixed orientation. "
                 "yaw,pitch,roll are reset-relative radians and must all be zero. "
                 "Gripper 0 closes, 1 opens; always explicitly specify gripper for every move. "
                 "State gripper is measured position, which can differ from a closed command under contact. "
@@ -276,7 +281,37 @@ class XTrainerEmbodiment:
     def step_command(self, command: Any) -> None:
         """Normal physics and invariant checks, also used by recorded-action replay."""
         t = self.torch
-        self.env.step(command)
+        # Check every native substep, not an averaged before/after control tick.
+        # Preserve native velocity fields for diagnostics and released-state checks.
+        indices = self.right_ids + self.finger_ids
+
+        def sample():
+            return (
+                self.robot.data.joint_pos[0, indices].cpu().numpy().copy(),
+                self.env.scene["cube"].data.root_state_w[0, :7].cpu().numpy().copy(),
+            )
+
+        previous = sample()
+        original_update = self.env.scene.update
+        speeds = []
+
+        def update(dt):
+            nonlocal previous
+            original_update(dt)
+            current = sample()
+            speeds.append(
+                measured_motion(previous[0], current[0], previous[1], current[1], dt)
+            )
+            previous = current
+
+        self.env.scene.update = update
+        try:
+            self.env.step(command)
+        finally:
+            self.env.scene.update = original_update
+        if len(speeds) != self.env.cfg.decimation:
+            raise RuntimeError("incomplete_physics_motion_samples")
+        self.last_motion_speeds = np.max(speeds, axis=0)
         self.ticks += 1
         if not t.isfinite(self.robot.data.joint_pos).all():
             raise RuntimeError("execution_nonfinite")
@@ -373,11 +408,19 @@ class XTrainerEmbodiment:
                 .max()
             )
             cube = self.env.scene["cube"].data
-            object_still = (
-                float(cube.root_lin_vel_w.norm()) < 0.01
-                and float(cube.root_ang_vel_w.norm()) < 0.1
+            # An open/released scene must also satisfy native velocity checks.
+            # Do not accept a slowly changing pose as proof of safe release.
+            reported = np.array(
+                [
+                    speed,
+                    float(cube.root_lin_vel_w.norm()),
+                    float(cube.root_ang_vel_w.norm()),
+                ]
             )
-            stable = stable + 1 if speed < 0.02 and object_still else 0
+            still = settling_sample_valid(
+                self.last_motion_speeds, reported, released=target[6] > 0.95
+            )
+            stable = stable + 1 if still else 0
             if stable >= 10:
                 break
         else:

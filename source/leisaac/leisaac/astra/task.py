@@ -27,6 +27,9 @@ RIGHT_BASE_IN_ROOT = (1.06, 0.0, 0.0)
 # Same grasp-center convention as upstream pick_cube/mdp/observations.py.
 # This is a reference convention, not a measured center of contact pressure.
 GRASP_IN_WRIST = (0.0, 0.0, 0.16)
+# Narrow distal collision-mesh region in the pinned upstream USD, metres.
+# Engineering geometry only: neither a calibrated TCP nor object/task state.
+GRIPPING_REGION_WRIST_Z = (0.168291953, 0.197000248)
 FIXED_VIEWS = {
     "front_rgb": ((0.55, -1.0, 0.8), (0.60, 0.0, 0.15)),
     "right_rgb": ((1.3, -0.7, 0.8), (0.60, 0.0, 0.15)),

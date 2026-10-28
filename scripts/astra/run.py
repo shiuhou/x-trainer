@@ -20,10 +20,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diagnostic-source", type=Path)
     parser.add_argument(
-        "--diagnostic-case", choices=("raw", "cartesian", "height", "contact")
+        "--diagnostic-case", choices=("raw", "cartesian", "height", "contact", "full")
     )
     parser.add_argument("--diagnostic-aperture", type=float, default=0.0)
     parser.add_argument("--center-cube", action="store_true")
+    parser.add_argument("--vertical-approach", action="store_true")
     parser.add_argument(
         "--height-shift", type=float, choices=(-0.005, 0.0, 0.005), default=0.0
     )
@@ -78,6 +79,12 @@ def main() -> int:
             # Enable reporting only: preserve all collider and dynamics properties.
             cfg.scene.robot.spawn.func = spawn_with_contact_reporting
             cfg.scene.scene.spawn.func = spawn_with_contact_reporting
+        result["simulation_configuration"] = {
+            "physics_dt": cfg.sim.dt,
+            "decimation": cfg.decimation,
+            "render_interval": cfg.sim.render_interval,
+            "solver_type": cfg.sim.physx.solver_type,
+        }
         env = ManagerBasedRLEnv(cfg=cfg)
         env.reset(seed=42)
         if args.mode == "original":
@@ -111,6 +118,7 @@ def main() -> int:
                 slow_close=args.slow_close,
                 aperture=args.diagnostic_aperture,
                 center_cube=args.center_cube,
+                vertical_approach=args.vertical_approach,
             )
             result["status"] = "DIAGNOSE_COMPLETE"
             return 0

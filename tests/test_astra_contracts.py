@@ -827,3 +827,163 @@ def test_contact_candidate_uses_validated_xyz_and_partial_closure_timing(
     np.testing.assert_array_equal(calls[-1][0], expected)
     assert calls[-1][1]["minimum_ticks"] == 2
     assert all(call[1]["minimum_ticks"] == 1 for call in calls[:-1])
+
+
+def test_motion_uses_physics_pose_differences_and_quaternion_sign_invariance():
+    from leisaac.astra.contracts import measured_motion
+
+    q0 = np.array([0, 0, 0, 1.0, 0, 0, 0])
+    q1 = np.array([0.001, 0, 0, np.cos(0.002), 0, 0, np.sin(0.002)])
+    speeds = measured_motion(np.zeros(8), np.ones(8) * 0.002, q0, q1, 0.02)
+    np.testing.assert_allclose(speeds, [0.1, 0.05, 0.2])
+    q1[3:] *= -1
+    np.testing.assert_allclose(
+        measured_motion(np.zeros(8), np.ones(8) * 0.002, q0, q1, 0.02), speeds
+    )
+
+
+@pytest.mark.parametrize("dt", [0, -1, float("nan")])
+def test_motion_rejects_invalid_physics_sample_period(dt):
+    from leisaac.astra.contracts import measured_motion
+
+    pose = np.array([0, 0, 0, 1.0, 0, 0, 0])
+    with pytest.raises(ValueError, match="invalid_motion_sample"):
+        measured_motion(np.zeros(8), np.zeros(8), pose, pose, dt)
+
+
+def test_settling_keeps_thresholds_and_native_velocity_check_for_release():
+    from leisaac.astra.contracts import settling_sample_valid
+
+    raw = np.array([0.05, 0.23, 6.2])
+    assert settling_sample_valid(np.zeros(3), raw, released=False)
+    assert not settling_sample_valid(np.zeros(3), raw, released=True)
+    for i, limit in enumerate([0.02, 0.01, 0.1]):
+        speeds = np.zeros(3)
+        speeds[i] = limit
+        assert not settling_sample_valid(speeds, np.zeros(3), released=False)
+    assert not settling_sample_valid(
+        np.zeros(3), np.array([0.0, 0, np.nan]), released=False
+    )
+
+
+def test_step_samples_opposing_substep_motion_and_restores_scene_update():
+    from types import SimpleNamespace
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+    from leisaac.astra.contracts import settling_sample_valid
+
+    class Tensor(np.ndarray):
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return np.asarray(self)
+
+    def tensor(value):
+        return np.asarray(value, dtype=float).view(Tensor)
+
+    class Scene(dict):
+        pass
+
+    cube_state = tensor([[0, 0, 0.12, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]])
+    scene = Scene(
+        cube=SimpleNamespace(
+            data=SimpleNamespace(root_state_w=cube_state, root_pos_w=cube_state[:, :3])
+        )
+    )
+    updates = []
+
+    def original(dt):
+        updates.append(dt)
+
+    scene.update = original
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.torch = SimpleNamespace(
+        isfinite=np.isfinite, abs=np.abs, max=np.max, any=np.any
+    )
+    emb.robot = SimpleNamespace(
+        data=SimpleNamespace(
+            joint_pos=tensor(np.zeros((1, 16))),
+            soft_joint_pos_limits=tensor([[[-3, 3]] * 16]),
+        )
+    )
+    emb.right_ids, emb.finger_ids, emb.left_ids = (
+        list(range(6)),
+        [6, 7],
+        list(range(8, 16)),
+    )
+    emb.left_initial = tensor(np.zeros((1, 8)))
+    emb.initial_cube = cube_state[:, :3].copy()
+    emb.ticks, emb.max_left_drift, emb.max_lift, emb.diagnostic_hook = 0, 0.0, 0.0, None
+
+    def step(command):
+        for x in [0.001, 0.0]:
+            cube_state[0, 0] = x
+            scene.update(1 / 60)
+
+    emb.env = SimpleNamespace(scene=scene, cfg=SimpleNamespace(decimation=2), step=step)
+    emb.step_command(None)
+    assert cube_state[0, 0] == 0  # Control-rate endpoints alone would hide this motion.
+    np.testing.assert_allclose(emb.last_motion_speeds, [0, 0.06, 0])
+    assert not settling_sample_valid(
+        emb.last_motion_speeds, np.zeros(3), released=False
+    )
+    assert scene.update is original and len(updates) == 2
+
+    def fail(command):
+        raise RuntimeError("physics_failure")
+
+    emb.env.step = fail
+    with pytest.raises(RuntimeError, match="physics_failure"):
+        emb.step_command(None)
+    assert scene.update is original
+
+
+def test_contact_settle_requires_ten_consecutive_valid_control_steps(monkeypatch):
+    from types import SimpleNamespace
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+
+    class Tensor(np.ndarray):
+        def abs(self):
+            return np.abs(self)
+
+        def norm(self):
+            return np.linalg.norm(self)
+
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.right_ids, emb.finger_ids = list(range(6)), [6, 7]
+    emb.robot = SimpleNamespace(
+        data=SimpleNamespace(joint_vel=np.zeros((1, 8)).view(Tensor))
+    )
+    cube = SimpleNamespace(
+        root_lin_vel_w=np.array([0.23, 0, 0]).view(Tensor),
+        root_ang_vel_w=np.array([6.2, 0, 0]).view(Tensor),
+    )
+    emb.env = SimpleNamespace(scene={"cube": SimpleNamespace(data=cube)})
+    calls = []
+
+    def physics(row):
+        calls.append(row)
+        emb.last_motion_speeds = np.zeros(3)
+        if len(calls) == 10:
+            emb.last_motion_speeds[1] = 0.011
+
+    monkeypatch.setattr(emb, "physics", physics)
+    target = np.array([0, 0, 0.2, 0, 0, 0, 0.0])
+    monkeypatch.setattr(emb, "state", lambda: target)
+    emb._settle(target)
+    assert len(calls) == 20
+    calls.clear()
+    target[6] = 1
+    with pytest.raises(RuntimeError, match="settle_timeout"):
+        emb._settle(target)
+    assert len(calls) == 120
+
+
+def test_diagnostic_body_vertices_apply_authored_scale_then_measured_pose():
+    from leisaac.astra.diagnose import posed_vertices
+
+    points = np.array([[1.0, 0, 0], [0, 1, 0]]) * 0.0254
+    pose = np.array([0.7, 0, 0.1, np.sqrt(0.5), 0, 0, np.sqrt(0.5)])
+    np.testing.assert_allclose(
+        posed_vertices(points, pose), [[0.7, 0.0254, 0.1], [0.6746, 0, 0.1]], atol=1e-12
+    )

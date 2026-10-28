@@ -5,13 +5,62 @@ plate. Both arms remain in the asset; only the right arm is policy-controlled.
 It does not connect to a robot controller, Leader, serial gripper or physical camera.
 The frozen MuJoCo S5 experiments remain a separate historical baseline.
 
-## Validated checkpoint
+## Current grasp checkpoint
 
-**Offline integration and live connectivity PASS; autonomous mission FAIL.**
+**Full privileged scripted pick/place PASS twice.** Original autonomous
+`mission-1` remains FAIL. One operator-authorized post-fix Astra mission is next;
+scripted success is not autonomous-policy success.
 
-The subsequent bounded offline grasp investigation also remains **BLOCKED at
-stable closure**; it did not validate a full scripted pick/place. See the offline
-diagnosis section below. No additional paid episode was run.
+The false closure timeout came from treating PhysX's reported velocity fields
+as actual transform motion under contact. PhysX documents that split-impulse
+position and velocity iterations produce different velocities; the reported
+velocity-iteration output is not the velocity used to integrate transforms.
+See [PhysX solver iterations](https://nvidia-omniverse.github.io/PhysX/physx/5.4.0/docs/RigidBodyDynamics.html#solver-iterations).
+Our native-substep trace measured approximately 0.230 m/s reported speed while
+position-derived speed was only 1.05e-6–2.32e-5 m/s in the same stationary grasp.
+
+The adapter now measures joint, cube-translation and quaternion rotation changes
+at **every physics substep**, retaining the maximum speed within each control
+step. It requires ten consecutive control steps below the existing limits
+(0.02 joint units/s, 0.01 m/s, 0.1 rad/s), within the existing 120-step bound.
+This explicitly changes the contact-settle measurement, not just a tolerance.
+Opposing substep excursions cannot cancel. Native velocity fields remain
+recorded; open/released settling additionally requires the original native
+velocity checks. Final task success and its released/settled checks are unchanged.
+This is a simulator observation-semantic correction, not a physical safety claim.
+
+The duplicate-collider and 240 Hz integration controls did not solve the failure;
+both candidate configuration changes were retired. Authored collision meshes,
+collision declarations, masses, friction, gains, solver and 60 Hz physics/30 Hz
+control remain original. The scripted baseline approaches vertically from above;
+the old diagonal approach caused contact/tracking failure in the finer-step
+control. These privileged targets are never passed to the policy.
+
+The public EEF remains the upstream +160 mm reference. Generic tool documentation
+now distinguishes that reference from the USD narrow finger region
+(+168.292..197.000 mm, midpoint +182.646 mm). No TCP rebasing or object coordinates
+were added to policy input. Diagnostic clearance calculations now retain authored
+body scale (cube 1.5, plate 0.0254) when transforming collision vertices.
+
+Both full episodes used 176 official interpolated waypoints and 759 normal
+physics control steps; recorded controls, joints and cube states match exactly.
+They lifted at least 65.053 mm through the one-second hold, with at most 0.837 mm
+cube/hand relative drift, transported 214.513 mm, released, and returned to rest.
+Sampled transport clearance is 27.681 mm. Both finish with upstream `task_done`,
+measured aperture >0.95 and native-velocity settled checks passing. Runtime was
+37.917/38.128 seconds, excluding Kit startup. No object teleport or joint-state
+playback was used after the single initial reset.
+
+Evidence: `.agents/runs/xtrainer-astra/grasp-diagnosis/collider-control/`,
+particularly `07-full-scripted-a/`, `08-full-scripted-b/` and `comparison.json`.
+Use the credential-free `diagnose --diagnostic-case full` entry for this
+**privileged scripted baseline**, not as autonomous-policy guidance.
+Scoped validation: 60 tests, Ruff/format, mypy (five own source modules),
+compilation and diff checks PASS. Historical evidence remains unchanged.
+
+## Historical live checkpoint
+
+**Offline integration and live connectivity PASS; first autonomous mission FAIL.**
 
 The original PickCube scene renders with the complete upstream assembly. The
 right-arm smoke moves up 4.989 mm and returns, closes and reopens the gripper,
@@ -430,7 +479,7 @@ unchanged. No MuJoCo or upstream-wide regression suite was rerun; no credentials
 were loaded, no provider calls/hardware connections were made, and nothing was
 pushed. A fresh paid Astra trial is not authorized by these offline results.
 
-### Contact-force follow-up (still blocked)
+### Historical contact-force follow-up (then blocked)
 
 The operator subsequently requested fixing the grasp before a single further
 Astra trial. That trial remains conditional on two complete scripted pick/place

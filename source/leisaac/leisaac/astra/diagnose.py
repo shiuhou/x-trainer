@@ -59,6 +59,14 @@ def transformed_points(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return (np.c_[points, np.ones(len(points))] @ matrix)[:, :3]
 
 
+def posed_vertices(points: np.ndarray, pose: np.ndarray) -> np.ndarray:
+    """Scaled body-local vertices to a measured world pose (wxyz quaternion)."""
+    q = pose[3:7] / np.linalg.norm(pose[3:7])
+    return (
+        points + 2 * np.cross(q[1:], np.cross(q[1:], points) + q[0] * points) + pose[:3]
+    )
+
+
 def bounds(points: np.ndarray) -> list:
     return [points.min(axis=0).tolist(), points.max(axis=0).tolist()]
 
@@ -184,7 +192,9 @@ class Diagnostics:
                 if str(p.GetPath()).startswith(prefix)
                 and p.HasAPI(UsdPhysics.RigidBodyAPI)
             )
-            inverse = np.linalg.inv(np.array(cache.GetLocalToWorldTransform(body_prim)))
+            body_transform = np.array(cache.GetLocalToWorldTransform(body_prim))
+            inverse = np.linalg.inv(body_transform)
+            body_scale = np.linalg.norm(body_transform[:3, :3], axis=1)
             vertices = []
             for prim in Usd.PrimRange(body_prim, Usd.TraverseInstanceProxies()):
                 if (
@@ -199,9 +209,11 @@ class Diagnostics:
                     )
             if not vertices:
                 raise RuntimeError("object_collision_mesh_unavailable:" + name)
-            self.object_points[name] = np.vstack(vertices)
+            self.object_points[name] = np.vstack(vertices) * body_scale
             self.geometry[name] = {
-                "collision_local_bounds": bounds(self.object_points[name]),
+                "collision_local_bounds": bounds(np.vstack(vertices)),
+                "collision_scaled_bounds_m": bounds(self.object_points[name]),
+                "body_scale": body_scale.tolist(),
                 "prim": str(body_prim.GetPath()),
             }
         self.local_corners = {}
@@ -323,6 +335,7 @@ class Diagnostics:
                 "joint_vel": emb.robot.data.joint_vel[0, emb.right_ids + emb.finger_ids]
                 .cpu()
                 .tolist(),
+                "measured_motion_speeds": emb.last_motion_speeds.tolist(),
                 "cube_state_w": cube.root_state_w[0].cpu().tolist(),
                 "plate_state_w": emb.env.scene["Plate"]
                 .data.root_state_w[0]
@@ -448,6 +461,159 @@ class ContactDiagnostics:
         )
 
 
+def full_scripted_acceptance(emb: Any, diagnostics: Diagnostics) -> dict:
+    """Privileged physical baseline; no target coordinates enter policy inputs."""
+    emb.initialize_settled_scene()
+    emb.observe("initial")
+    rest = emb.state().copy()
+    rest[3:6], rest[6] = 0, 1
+    target, geometry = diagnostics.candidate(0.0, center_cube=True)
+    cube = emb.env.scene["cube"]
+    plate = emb.env.scene["Plate"]
+    initial = cube.data.root_pos_w[0].cpu().numpy().copy()
+
+    def stage(name: str, row: np.ndarray) -> None:
+        diagnostics.phase = name
+        move(emb, row)
+
+    above = target.copy()
+    above[2] += 0.10
+    stage("approach", above)
+    stage("descend", target)
+    target[6] = 0
+    stage("close", target)
+    emb.metrics()  # Preserve the upstream heuristic separately from physical proof.
+    closed_eef = emb.state()[:3].copy()
+    closed_cube = cube.data.root_pos_w[0].cpu().numpy().copy()
+    emb.diagnostic_capture("grasp")
+
+    # Dynamic world bounds include the USD body's authored scale.
+    def world_points(name: str, asset: Any) -> np.ndarray:
+        points = emb.torch.tensor(
+            diagnostics.object_points[name], device=emb.device, dtype=emb.torch.float32
+        )
+        return (
+            (
+                emb.math.quat_apply(
+                    asset.data.root_quat_w.expand(len(points), -1), points
+                )
+                + asset.data.root_pos_w
+            )
+            .cpu()
+            .numpy()
+        )
+
+    cube_vertices = world_points("cube", cube)
+    plate_vertices = world_points("Plate", plate)
+    half_cube = float(closed_cube[2] - cube_vertices[:, 2].min())
+    plate_top = float(plate_vertices[:, 2].max())
+    finger_drop = float(
+        emb.state()[2]
+        + emb.robot.data.root_pos_w[0, 2]
+        - min(
+            sample["collision_aabb_w"][0][2]
+            for key, sample in diagnostics.samples[-1]["bodies"].items()
+            if key in ("J2_7", "J2_8")
+        )
+    )
+    lift = target.copy()
+    lift[2] += max(
+        0.065,
+        plate_top
+        + 0.02
+        - min(
+            cube_vertices[:, 2].min(),
+            float(emb.state()[2] + emb.robot.data.root_pos_w[0, 2]) - finger_drop,
+        ),
+    )
+    stage("lift", lift)
+    diagnostics.phase = "hold"
+    hold = []
+    for _ in range(int(np.ceil(1.0 / emb.env.step_dt))):
+        emb.physics(lift)
+        actual_cube = cube.data.root_pos_w[0].cpu().numpy().copy()
+        followed = np.linalg.norm(
+            (actual_cube - closed_cube) - (emb.state()[:3] - closed_eef)
+        )
+        height = float(actual_cube[2] - initial[2])
+        hold.append({"lift_m": height, "tracking_error_m": float(followed)})
+        if height < 0.05 or followed > 0.01:
+            raise RuntimeError("scripted_grasp_not_sustained")
+    emb.settle(lift)
+    emb.observe("lifted")
+    offset = emb.state()[:3] - diagnostics.world_to_base(cube.data.root_pos_w[0])
+    transport = lift.copy()
+    transport[:2] = diagnostics.world_to_base(plate.data.root_pos_w[0])[:2] + offset[:2]
+    stage("transport", transport)
+    support_top = max(plate_top, diagnostics.geometry["table_support_z_w"])
+    transport_samples = [s for s in diagnostics.samples if s["phase"] == "transport"]
+    clearance = min(
+        min(
+            float(
+                posed_vertices(
+                    diagnostics.object_points["cube"], np.asarray(s["cube_state_w"][:7])
+                )[:, 2].min()
+            ),
+            *(s["bodies"][n]["collision_aabb_w"][0][2] for n in ("J2_7", "J2_8")),
+        )
+        - support_top
+        for s in transport_samples
+    )
+    if clearance < 0.02:
+        raise RuntimeError("scripted_transport_clearance_reject")
+    actual_cube = cube.data.root_pos_w[0].cpu().numpy().copy()
+    if (
+        np.linalg.norm(actual_cube[:2] - plate.data.root_pos_w[0, :2].cpu().numpy())
+        > 0.01
+    ):
+        raise RuntimeError("scripted_transport_not_following")
+    if float(actual_cube[2] - initial[2]) < 0.05:
+        raise RuntimeError("scripted_transport_dropped")
+    emb.diagnostic_capture("transport")
+    release = transport.copy()
+    release[2] = (
+        plate_top
+        + half_cube
+        + 0.005
+        - float(emb.robot.data.root_pos_w[0, 2])
+        + offset[2]
+    )
+    stage("lower_to_plate", release)
+    release[6] = 1
+    stage("release", release)
+    release_metrics = emb.metrics()
+    if emb.state()[6] <= 0.95:
+        raise RuntimeError("scripted_gripper_not_released")
+    retreat = release.copy()
+    retreat[2] += 0.10
+    stage("retreat", retreat)
+    # Keep each official interpolated chunk inside its existing path budget.
+    midpoint = (retreat + rest) / 2
+    midpoint[3:6], midpoint[6] = 0, 1
+    stage("return_midpoint", midpoint)
+    stage("return_rest", rest)
+    metrics = emb.metrics()
+    if not metrics["success"]:
+        raise RuntimeError("scripted_final_evaluator_reject")
+    return {
+        "outcome": "FULL_SCRIPTED_PASS",
+        "grasp_geometry": geometry,
+        "hold_seconds": len(hold) * emb.env.step_dt,
+        "minimum_hold_lift_m": min(row["lift_m"] for row in hold),
+        "maximum_hold_tracking_error_m": max(row["tracking_error_m"] for row in hold),
+        "transport_distance_m": float(np.linalg.norm(actual_cube[:2] - initial[:2])),
+        "minimum_transport_clearance_m": clearance,
+        "release_evaluator": release_metrics,
+        "center_cube": True,
+        "vertical_approach": True,
+        "grasp": True,
+        "lift": True,
+        "transport": True,
+        "release": True,
+        "evaluator": metrics,
+    }
+
+
 def run_diagnosis(
     emb: Any,
     episode: Any,
@@ -458,6 +624,7 @@ def run_diagnosis(
     slow_close: bool = False,
     aperture: float = 0.0,
     center_cube: bool = False,
+    vertical_approach: bool = False,
 ) -> dict:
     if not np.isfinite(aperture) or not 0 <= aperture <= 1:
         raise ValueError("invalid_diagnostic_aperture")
@@ -470,13 +637,16 @@ def run_diagnosis(
         "provider_requests": 0,
         "commanded_aperture": aperture,
         "center_cube": center_cube,
+        "vertical_approach": vertical_approach,
         "raw_replay_only_initial_state_restored": True,
         "source_sha256": hashlib.sha256(
             (source / "episode.hdf5").read_bytes()
         ).hexdigest(),
     }
     try:
-        if case == "raw":
+        if case == "full":
+            result.update(full_scripted_acceptance(emb, diagnostics))
+        elif case == "raw":
             emb.observe("initial")
             actions = episode.data["actions"]
             for index, command in enumerate(actions):
@@ -523,6 +693,8 @@ def run_diagnosis(
                 x, y, z = map(float, candidate[:3])
                 targets[-2] = (x, y, z, 1)
                 targets[-1] = (x, y, z, 0)
+                if vertical_approach:
+                    targets = [(x, y, z + 0.10, 1), (x, y, z, 1), (x, y, z, 0)]
             for index, (x, y, z, grip) in enumerate(targets):
                 closing = grip == 0
                 diagnostics.phase = "close" if closing else f"approach_{index + 1}"

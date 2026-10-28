@@ -65,6 +65,62 @@ def measured_aperture(left: float, right: float, travel: float = 0.04) -> float:
     return 1.0 - (right - left) / (2 * travel)
 
 
+def measured_motion(
+    previous_joints: NDArray,
+    joints: NDArray,
+    previous_pose: NDArray,
+    pose: NDArray,
+    dt: float,
+) -> NDArray:
+    """Actual substep motion: joint, translation and quaternion angular speeds.
+
+    PhysX split-impulse velocity fields are not the transform-integration
+    velocities under contact. Never substitute a control-rate average: sample
+    every physics substep so opposing excursions cannot cancel.
+    """
+    if (
+        not np.isfinite(dt)
+        or dt <= 0
+        or previous_joints.shape != joints.shape
+        or joints.ndim != 1
+        or joints.size == 0
+        or previous_pose.shape != (7,)
+        or pose.shape != (7,)
+        or not all(
+            np.isfinite(a).all() for a in (previous_joints, joints, previous_pose, pose)
+        )
+    ):
+        raise ValueError("invalid_motion_sample")
+    q0, q1 = previous_pose[3:].astype(float), pose[3:].astype(float)
+    norms = np.array([np.linalg.norm(q0), np.linalg.norm(q1)])
+    if np.any(np.abs(norms - 1) > 0.001):
+        raise ValueError("invalid_motion_quaternion")
+    q0, q1 = q0 / norms[0], q1 / norms[1]
+    vector = q0[0] * q1[1:] - q1[0] * q0[1:] + np.cross(q0[1:], q1[1:])
+    angle = 2 * np.arctan2(np.linalg.norm(vector), abs(np.dot(q0, q1)))
+    return np.array(
+        [
+            np.max(np.abs(joints - previous_joints)) / dt,
+            np.linalg.norm(pose[:3] - previous_pose[:3]) / dt,
+            angle / dt,
+        ]
+    )
+
+
+def settling_sample_valid(
+    measured: NDArray, reported: NDArray, *, released: bool
+) -> bool:
+    """Keep the speed limits and additionally require native velocities on release."""
+    if measured.shape != (3,) or reported.shape != (3,):
+        raise ValueError("invalid_settling_sample")
+    if not np.isfinite(measured).all() or not np.isfinite(reported).all():
+        return False
+    limits = np.array([0.02, 0.01, 0.1])
+    return bool(
+        np.all(measured < limits) and (not released or np.all(reported < limits))
+    )
+
+
 class Freshness:
     """Accept only new coherent captures; static pixels alone are not stale."""
 
