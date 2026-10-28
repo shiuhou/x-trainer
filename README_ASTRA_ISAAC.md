@@ -95,6 +95,36 @@ The failure montage renders the stopped state without another physics step;
 it is diagnostic-only, not another policy generation. Raw recording and failure
 metadata are retained. No hardware access, model retry or push occurred.
 
+### Separately authorized isolated provider diagnostic
+
+After that failed episode, the operator authorized one recorded-observation
+diagnostic, without a simulator or action execution. Three credential-free HEAD
+probes through the existing automatically selected proxy passed CONNECT, verified
+TLS and returned HTTP 200 in 0.956–1.062 seconds. These only test relay reachability.
+
+The single subsequent model request used the same official agent, Responses,
+`gpt-6-astra`, shared provider/guard, 60-second request timeout and disabled
+transport retries. It returned HTTP 200 in 22.668 seconds; the official agent
+produced `move_to` and 16 interpolated waypoints, all **unexecuted**. TLS completed
+at 0.697 seconds, the provider request body finished sending at 0.698 seconds,
+response headers arrived at 22.615 seconds, and the response body finished at
+22.667 seconds. Waiting from request-body completion to response headers was
+21.917 seconds. Usage: 7,128 input + 80 output = 7,208 tokens. No timeout occurred.
+
+This was a fresh agent session using the saved terminal diagnostic RGB images
+and measured generation-2 EEF at the same stopped physics state. Those images
+differ from the original policy pixels, and prior conversation history was not
+reconstructed. It is **not an exact replay** or proof that the intermittent
+timeout is fixed. The old failed request's coarse telemetry cannot identify
+its precise timeout stage; neither test distinguishes relay waiting from
+upstream model waiting. No additional mission or model retry followed.
+Metadata-only stage events and result are in
+`.agents/runs/xtrainer-astra/provider-diagnostic-1/result.json`; no request headers,
+raw provider response or private reasoning were persisted. One container setup
+failed to read the credential mount before client construction; restoring the
+existing runner's DAC_OVERRIDE capability resolved access without changing the
+credential file. That setup failure transmitted no model request.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**
