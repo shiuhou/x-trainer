@@ -243,6 +243,10 @@ def main() -> int:
                 guard=guard,
                 base_url=APPROVED_RELAY,
             )
+            from provider_trace import PhaseTraceTransport
+
+            phases = PhaseTraceTransport(transport.inner)
+            transport.inner = phases
             scene = Scene(id="xtrainer-isaac-" + args.mode, instruction=instruction)
             policy.reset(scene)
             guard.install()
@@ -300,6 +304,7 @@ def main() -> int:
                     provider_requests=transport.transmitted_requests,
                     request_attempts=budget.requests,
                     usage=transport.events,
+                    transport_phases=phases.events,
                     decisions_trace=decisions,
                     model=args.model,
                     model_seconds=transport.seconds,

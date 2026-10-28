@@ -987,3 +987,65 @@ def test_diagnostic_body_vertices_apply_authored_scale_then_measured_pose():
     np.testing.assert_allclose(
         posed_vertices(points, pose), [[0.7, 0.0254, 0.1], [0.6746, 0, 0.1]], atol=1e-12
     )
+
+
+def test_transport_phase_trace_preserves_timeout_and_redacts_payload(monkeypatch):
+    import httpx
+
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[1] / "scripts/astra")
+    )
+    from provider_trace import PhaseTraceTransport
+
+    previous = []
+    marker = "fixture-private-header-and-exception"
+
+    def fail(request):
+        assert request.extensions["timeout"] == {"read": 60.0}
+        trace = request.extensions["trace"]
+        trace("http11.send_request_body.complete", {"headers": marker})
+        trace("http11.receive_response_headers.failed", {"exception": marker})
+        raise httpx.ReadTimeout(marker)
+
+    transport = PhaseTraceTransport(httpx.MockTransport(fail))
+    request = httpx.Request("POST", "https://example.invalid/responses")
+    request.extensions.update(
+        timeout={"read": 60.0}, trace=lambda n, i: previous.append(n)
+    )
+    with pytest.raises(httpx.ReadTimeout):
+        transport.handle_request(request)
+    assert previous == [
+        "http11.send_request_body.complete",
+        "http11.receive_response_headers.failed",
+    ]
+    assert transport.events[-1]["timeout_type"] == "ReadTimeout"
+    assert transport.requests == 1
+    assert marker not in repr(transport.events)
+    assert all(
+        event["attempt"] == 1 and event["elapsed_s"] >= 0 for event in transport.events
+    )
+    transport.close()
+
+
+def test_transport_phase_trace_preserves_response_and_existing_trace(monkeypatch):
+    import httpx
+
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[1] / "scripts/astra")
+    )
+    from provider_trace import PhaseTraceTransport
+
+    seen = []
+
+    def respond(request):
+        request.extensions["trace"]("http11.receive_response_headers.complete", {})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = PhaseTraceTransport(httpx.MockTransport(respond))
+    for _ in range(2):
+        request = httpx.Request("POST", "https://example.invalid/responses")
+        request.extensions["trace"] = lambda name, info: seen.append(name)
+        assert transport.handle_request(request).json() == {"ok": True}
+    assert len(seen) == 2
+    assert [event["attempt"] for event in transport.events] == [1, 2]
+    transport.close()

@@ -8,9 +8,10 @@ The frozen MuJoCo S5 experiments remain a separate historical baseline.
 ## Current grasp checkpoint
 
 **Full privileged scripted pick/place PASS twice.** Original autonomous
-`mission-1` remains FAIL. The single operator-authorized post-fix Astra mission
-has completed with **FAIL / model_timeout on request 2**; scripted success is
-not autonomous-policy success. No further mission or retry was run.
+`mission-1` remains FAIL. Both separately authorized post-fix Astra missions
+(`mission-2-postfix` and `mission-3-postfix`) ended with **FAIL / model_timeout
+on request 2**; scripted success is not autonomous-policy success. No automatic
+model retry was run.
 
 The false closure timeout came from treating PhysX's reported velocity fields
 as actual transform motion under contact. PhysX documents that split-impulse
@@ -117,13 +118,54 @@ differ from the original policy pixels, and prior conversation history was not
 reconstructed. It is **not an exact replay** or proof that the intermittent
 timeout is fixed. The old failed request's coarse telemetry cannot identify
 its precise timeout stage; neither test distinguishes relay waiting from
-upstream model waiting. No additional mission or model retry followed.
+upstream model waiting. The subsequently authorized mission is recorded below.
 Metadata-only stage events and result are in
 `.agents/runs/xtrainer-astra/provider-diagnostic-1/result.json`; no request headers,
 raw provider response or private reasoning were persisted. One container setup
 failed to read the credential mount before client construction; restoring the
 existing runner's DAC_OVERRIDE capability resolved access without changing the
 credential file. That setup failure transmitted no model request.
+
+## Renewed autonomous mission after isolated diagnostic
+
+The operator authorized one further bounded mission after the isolated diagnostic.
+`mission-3-postfix` ran from `d28155c7a7e98fbbacd6bb2937bafd655e44a424`, with the
+same official agent, model, provider and 60-second request timeout. Limits stayed
+12 requests / 12 decisions / 384 waypoints / 600 seconds; no automatic retry.
+
+**FAIL / model_timeout: `provider request timed out` on transmitted request 2.**
+Request 1 returned HTTP 200 in 50.569 seconds and a generic open-gripper `move_to`
+to `[-0.345, -0.0175, 0.2557]` metres. Its 21 official interpolated waypoints
+passed validation and executed through Isaac IK/physics, settle and fresh
+observation, advancing generations 1 -> 2 with 89 recorded control steps.
+Request 2 timed out after 60.103 seconds without a response or usage metadata.
+There was one policy decision; no closure, grasp, lift or transport was reached.
+Evaluator `success=false`, `grasp_seen=false`, `released=true`, `settled=true`.
+The two full scripted successes remain valid; autonomous grasp is still unverified.
+
+Returned usage is 7,231 input + 196 output = **7,427 known tokens**; request 2
+usage/billing is unknown. Model waiting totalled 110.671 seconds, render 1.106,
+validation 0.016, execute 2.178, settle 1.282; episode total **120.787 seconds**
+excluding Kit startup/preflight. This run was dominated by provider waiting.
+The precise timeout stage and whether relay or upstream processing caused it
+are **not established**. An isolated successful call does not establish reliable
+multi-turn service; history size or latency remain hypotheses, not root causes.
+
+Primary evidence is local at `.agents/runs/xtrainer-astra/mission-3-postfix/`:
+result, physics HDF5, actions, observations and terminal images are preserved.
+A mistaken duplicate launch was rejected by the existing output-directory guard
+before initialization or client construction, transmitting **zero extra requests**.
+Its shell redirection replaced the adjacent verbose startup `.log`; that original
+startup log is unavailable. The primary episode evidence was not overwritten.
+
+The runner now records bounded metadata-only HTTP phase events (TCP, TLS,
+request send, response receive and timeout class), chaining the existing transport
+trace without changing routing, deadlines, retry policy or request contents.
+It stores no headers, bodies or exception messages. This instrumentation was
+added **after** mission 3 and validated offline only; it cannot retrospectively
+identify that episode's timeout phase. Scoped checks: **62 adapter tests PASS**,
+Ruff/format, mypy (six own sources), compilation, shell syntax and credential-content
+audit PASS. No further provider call, physical hardware access or push occurred.
 
 ## Historical live checkpoint
 
