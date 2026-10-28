@@ -8,8 +8,9 @@ The frozen MuJoCo S5 experiments remain a separate historical baseline.
 ## Current grasp checkpoint
 
 **Full privileged scripted pick/place PASS twice.** Original autonomous
-`mission-1` remains FAIL. One operator-authorized post-fix Astra mission is next;
-scripted success is not autonomous-policy success.
+`mission-1` remains FAIL. The single operator-authorized post-fix Astra mission
+has completed with **FAIL / model_timeout on request 2**; scripted success is
+not autonomous-policy success. No further mission or retry was run.
 
 The false closure timeout came from treating PhysX's reported velocity fields
 as actual transform motion under contact. PhysX documents that split-impulse
@@ -57,6 +58,42 @@ Use the credential-free `diagnose --diagnostic-case full` entry for this
 **privileged scripted baseline**, not as autonomous-policy guidance.
 Scoped validation: 60 tests, Ruff/format, mypy (five own source modules),
 compilation and diff checks PASS. Historical evidence remains unchanged.
+
+## Post-fix Astra mission
+
+The one authorized trial used offline fix commit
+`de3423c47adbcc94f578e7cea98c01371ae92f2e`, official agent revision
+`7e506e3b6f39530f18e75cf97b23c4287aa90f12`, Responses, `gpt-6-astra`,
+and the existing shared SciTrace provider/proxy configuration. Limits remained
+12 requests, 12 decisions, 384 waypoints and 600 seconds, with transport retries
+disabled. Evidence is preserved in `.agents/runs/xtrainer-astra/mission-2-postfix/`.
+
+Two requests were transmitted. The first returned HTTP 200 and one permitted
+`move_to`; its 25 official interpolated waypoints passed validation and executed
+through Isaac IK/physics, settle and a fresh observation. Generations advanced
+1 -> 2, simulation time 0.466667 -> 3.700000 seconds, with 110 recorded control
+steps. The measured reference moved from approximately
+`[-0.344996, -0.117501, 0.255656]` to `[-0.464981, -0.117498, 0.200001]` metres,
+with the gripper open.
+
+The second transmitted request returned no response before the existing shared
+transport's 60-second request timeout. Exact failure:
+`model_timeout: provider request timed out`. This is a provider/relay response
+timeout; the evidence does not isolate which upstream service caused it. The
+episode stopped before closure, grasp, lift or transport. Final evaluator:
+`success=false`, `released=true`, `settled=true`. It therefore does not validate
+autonomous grasping after the fix, nor demonstrate a new grasp failure.
+
+Known returned usage is 29,909 tokens (29,687 input, 222 output) from request 1.
+Request 2 returned no usage; its billed usage is unknown. Model/provider waiting
+was 103.602 seconds (43.498 + 60.104), render 1.129, validation 0.014, execute
+2.855, settle 1.311, and total 114.492 seconds excluding Kit startup/preflight.
+The loop was dominated by provider waiting. The relay reported the requested
+model identifier; this does not independently attest underlying model weights.
+
+The failure montage renders the stopped state without another physics step;
+it is diagnostic-only, not another policy generation. Raw recording and failure
+metadata are retained. No hardware access, model retry or push occurred.
 
 ## Historical live checkpoint
 
@@ -130,9 +167,10 @@ Read-only analysis of the final 120 recorded physics ticks found cube linear
 speed 0.0511–0.1598 m/s (last 0.0958), angular speed 2.480–10.049 rad/s
 (last 8.531), and zero ticks meeting the existing object-still thresholds
 (0.01 m/s and 0.1 rad/s). Therefore extending the time threshold is not an
-established fix. Persistent motion during closure explains the settle rejection;
-the underlying cause among approach/contact geometry/controller dynamics has
-not been isolated. No physics parameter or success criterion was relaxed.
+established fix. These were reported velocity fields, originally interpreted as
+persistent motion. The later native-substep investigation above supersedes that
+interpretation: reported velocity alone does not establish transform motion
+under contact. This historical episode remains failed under its original gate.
 
 Mission usage was 194,297 tokens. Model time was 101.757 s, render 1.321 s,
 validation 0.039 s, execution 14.680 s, completed settle 3.046 s, total 131.674 s:
