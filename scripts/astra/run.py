@@ -29,6 +29,8 @@ def arguments() -> argparse.Namespace:
             "full",
             "recorded",
             "separated",
+            "vertical",
+            "short_descent",
         ),
     )
     parser.add_argument("--diagnostic-aperture", type=float, default=0.0)
@@ -87,6 +89,8 @@ def main() -> int:
             "contact",
             "recorded",
             "separated",
+            "vertical",
+            "short_descent",
         ):
             from leisaac.astra.diagnose import spawn_with_contact_reporting
 

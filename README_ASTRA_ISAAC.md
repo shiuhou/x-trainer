@@ -415,6 +415,71 @@ phase timings, actions, observations, physics recording and stopped-state images
 audit PASS. No hardware, automatic retry or push. This opt-in diagnostic does not
 change the default timeout for future episodes or authorize another paid trial.
 
+## Mission 7 offline approach investigation and observation guidance
+
+Three credential-free, network-disabled episodes compare the same final model
+target without changing geometry, physics, gains, IK, tracking/settle thresholds,
+or model budgets. No provider client is constructed. The recorded Cartesian
+replay reproduces all **358 controls, joint positions/velocities and cube poses/
+velocities exactly** (maximum absolute difference zero).
+
+| Control | Result | Terminal error to last commanded waypoint | Fresh generation |
+| --- | --- | ---: | ---: |
+| Original oblique open descent | `IK_tracking_failure` | 4.665 mm | 4 |
+| Align XY at previous height, then vertical descent to same target | `settle_timeout` after reaching target | 0.158 mm | 5 |
+| Same XY alignment, then <=5 mm vertical chunks with settle/observation | `settle_timeout` at reference Z76.926 mm | 1.061 mm | 9 |
+
+The original path has sustained **one-sided finger/cube contact** while the cube
+is supported by the table. Last 20 native substeps have mean summed absolute
+normal loads 7.414 N on finger J2_7, zero on J2_8, and 7.548 N on cube/table.
+These are simulator contact-normal loads, not calibrated or net forces. Over the
+failed waypoint, position error drops from 6.973 to 4.665 mm but its final ten
+control samples span only 0.000988 mm: contact-constrained tracking reaches a
+stationary residual. This is not evidence of free-space target unreachability.
+Finger/table contacts are not instrumented; do not infer them from cube contacts.
+
+Separating axes removes that tracking failure but does **not** establish a safe
+or successful grasp: the model's endpoint still disturbs the cube and fails the
+unchanged released-state stability check. Small chunks expose this issue earlier,
+well above final Z40 mm, while producing four additional usable observations
+before the failure. They do not correct XY alignment by themselves. Both negative
+controls are retained; no extra episode searches for a lucky success.
+
+Visual review of saved pre-failure and terminal RGB images finds partial finger/
+object occlusion in front_rgb, complementary height/clearance cues in right_rgb,
+and visible cube/both fingers with asymmetric overlap in wrist_rgb. The camera
+layout is retained: missing views are not established as the cause. This is a
+qualitative review, not calibration, pixel equivalence or proof the model will
+infer accurate coordinates. All three model-facing views and shapes stay intact.
+
+Embodiment tool documentation now asks the policy to align XY while clear, avoid
+diagonal insertion near the object, and use separate **5–10 mm or smaller**
+vertical commands near contact, inspecting each new observation before continuing.
+It explicitly distinguishes interpolation waypoints from policy observation
+boundaries and asks it to cross-check wrist and right views. No privileged target
+coordinates or evaluator state are added. These are policy instructions, **not**
+automatic path rewriting or a guaranteed near-object collision guard; proximity
+is inferred from images. The existing separate-closure guard remains in force.
+Extra decisions still consume the original finite model budget. Live benefit of
+this new guidance is NOT_RUN; the frozen autonomous missions remain failures.
+
+Failed tracking now stores at most 30 position/orientation error samples and
+measured EEF states, with `aborted_no_automatic_motion`. Failed-waypoint execution
+time is accumulated in `finally`, including unexpected execution errors. No new
+policy observation is issued after failure, and no implicit retry, retreat, push
+or longer convergence window is introduced. Diagnostic contact sampling now covers
+approach phases too, retaining only the last 256 native substeps. Hidden contact
+and object records remain outside the policy observation.
+
+The offline runner offers `--diagnostic-case vertical` and `short_descent`, which
+modify only the final recorded open descent and preserve its final target. The
+last successful policy observation and stopped-state failure image remain distinct.
+Evidence lives in `.agents/runs/xtrainer-astra/grasp-diagnosis/mission7-approach/`,
+with `comparison.json`, per-case physics/contact/action traces and images.
+**86 focused tests PASS**, scoped Ruff/format, mypy (three modified source modules),
+compilation and diff review PASS. All old evidence and unrelated dirty work remain
+untouched. No model requests, credentials, physical hardware or push.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**

@@ -58,6 +58,25 @@ def recorded_targets(source: Path, *, separate_close: bool = False) -> list[np.n
     return rows
 
 
+def vertical_approach_targets(
+    current: np.ndarray, target: np.ndarray, *, step_m: float | None = None
+) -> list[np.ndarray]:
+    """Offline path control: same endpoint, horizontal alignment then descent."""
+    if target[6] != 1 or target[2] >= current[2]:
+        raise ValueError("vertical_control_requires_open_descent")
+    if step_m is not None and (not np.isfinite(step_m) or step_m <= 0):
+        raise ValueError("invalid_descent_partition")
+    aligned = target.copy()
+    aligned[2] = current[2]
+    count = 1 if step_m is None else int(np.ceil((current[2] - target[2]) / step_m))
+    if count < 1 or count > 64:
+        raise ValueError("invalid_descent_partition")
+    return [aligned] + [
+        np.array([*target[:2], z, *target[3:]])
+        for z in np.linspace(current[2], target[2], count + 1)[1:]
+    ]
+
+
 def load_replay(env: Any, source: Path) -> Any:
     """Upstream dataset reader and one initial reset_to, never state playback."""
     from isaaclab.utils.datasets import HDF5DatasetFileHandler
@@ -441,7 +460,9 @@ class ContactDiagnostics:
 
     def update(self, dt: float) -> None:
         self.original_update(dt)
-        if self.diagnostics.phase != "close":
+        if self.diagnostics.phase != "close" and not self.diagnostics.phase.startswith(
+            "approach_"
+        ):
             return
         emb = self.emb
         force, points, normals, separation, counts, starts = (
@@ -655,7 +676,7 @@ def run_diagnosis(
     diagnostics = Diagnostics(emb)
     contacts = (
         ContactDiagnostics(diagnostics)
-        if case in ("contact", "recorded", "separated")
+        if case in ("contact", "recorded", "separated", "vertical", "short_descent")
         else None
     )
     emb.diagnostic_hook = diagnostics
@@ -674,14 +695,26 @@ def run_diagnosis(
     try:
         if case == "full":
             result.update(full_scripted_acceptance(emb, diagnostics))
-        elif case in ("recorded", "separated"):
+        elif case in ("recorded", "separated", "vertical", "short_descent"):
             emb.initialize_settled_scene()
             emb.observe("initial")
-            for index, row in enumerate(
-                recorded_targets(source, separate_close=case == "separated")
-            ):
+            replay_targets = recorded_targets(
+                source, separate_close=case == "separated"
+            )
+            for index, row in enumerate(replay_targets):
                 diagnostics.phase = "close" if row[6] == 0 else f"approach_{index + 1}"
-                move(emb, row)
+                controls = (
+                    vertical_approach_targets(
+                        emb.state(),
+                        row,
+                        step_m=0.005 if case == "short_descent" else None,
+                    )
+                    if case in ("vertical", "short_descent")
+                    and index == len(replay_targets) - 1
+                    else [row]
+                )
+                for control in controls:
+                    move(emb, control)
             result["outcome"] = "recorded_targets_settled"
         elif case == "raw":
             emb.observe("initial")

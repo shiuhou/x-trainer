@@ -108,7 +108,14 @@ class XTrainerEmbodiment:
                 "yaw,pitch,roll are reset-relative radians and must all be zero. "
                 "Gripper 0 closes, 1 opens; always explicitly specify gripper for every move. "
                 "For grasping, move to the approach/grasp position with gripper=1, "
-                "then wait for the fresh settled observation. Close in a separate move_to "
+                "Align X/Y above the object while maintaining clear height before descending; "
+                "avoid diagonal insertion near the object. Check wrist_rgb for centering and "
+                "right_rgb for clearance; front_rgb alone can hide a finger/object overlap. "
+                "Near the object, descend vertically in separate move_to calls of 0.005 to 0.010 m "
+                "or less, inspecting a fresh observation after each call. Small interpolated "
+                "waypoints inside one long chunk do not provide intermediate policy images. "
+                "If either finger overlaps the object, correct alignment while clear before descending. "
+                "Then wait for the fresh settled observation. Close in a separate move_to "
                 "with only gripper specified (omit XYZ). Moving while newly closing is rejected. "
                 "After closure, lift/transport may keep the same closed gripper command. "
                 "State gripper is measured position, which can differ from a closed command under contact. "
@@ -367,27 +374,44 @@ class XTrainerEmbodiment:
         self.consumed = True
         for row in rows:
             start = time.monotonic()
-            for tick in range(30):
-                self.physics(row)
-                state = self.state()
-                if (
-                    tick + 1 >= minimum_ticks
-                    and np.linalg.norm(state[:3] - row[:3]) < TRACKING_POSITION_M
-                    and np.linalg.norm(state[3:6]) < 0.035
-                ):
-                    break
-            else:
-                self.action_trace.append(
-                    {
-                        "status": "IK_tracking_failure",
-                        "target": row.tolist(),
-                        "actual": self.state().tolist(),
-                        "right_joints": self.robot.data.joint_pos[0, self.right_ids]
-                        .cpu()
-                        .tolist(),
-                    }
-                )
-                raise RuntimeError("IK_tracking_failure")
+            tracking_samples = []
+            try:
+                for tick in range(30):
+                    self.physics(row)
+                    state = self.state()
+                    tracking_samples.append(
+                        {
+                            "control_tick": tick + 1,
+                            "position_error_m": float(
+                                np.linalg.norm(state[:3] - row[:3])
+                            ),
+                            "orientation_error_rad": float(np.linalg.norm(state[3:6])),
+                            "actual": state.tolist(),
+                        }
+                    )
+                    if (
+                        tick + 1 >= minimum_ticks
+                        and tracking_samples[-1]["position_error_m"]
+                        < TRACKING_POSITION_M
+                        and tracking_samples[-1]["orientation_error_rad"] < 0.035
+                    ):
+                        break
+                else:
+                    self.action_trace.append(
+                        {
+                            "status": "IK_tracking_failure",
+                            "target": row.tolist(),
+                            "actual": state.tolist(),
+                            "tracking_samples": tracking_samples,
+                            "right_joints": self.robot.data.joint_pos[0, self.right_ids]
+                            .cpu()
+                            .tolist(),
+                            "recovery": "aborted_no_automatic_motion",
+                        }
+                    )
+                    raise RuntimeError("IK_tracking_failure")
+            finally:
+                self.timing["execute"] += time.monotonic() - start
             self.step_count += 1
             self.closed_seen |= bool(row[6] < 0.2)
             self.action_trace.append(
@@ -397,7 +421,6 @@ class XTrainerEmbodiment:
                     "actual": self.state().tolist(),
                 }
             )
-            self.timing["execute"] += time.monotonic() - start
         self.settle(rows[-1])
         return self.observe(f"decision_{len(self.observation_trace):02d}")
 

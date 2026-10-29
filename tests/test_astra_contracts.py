@@ -1203,3 +1203,80 @@ def test_read_timeout_override_requires_episode_budget(monkeypatch):
         PhaseTraceTransport(
             httpx.MockTransport(lambda r: httpx.Response(200)), read_timeout_s=180
         )
+
+
+@pytest.mark.parametrize("step", [None, 0.005])
+def test_vertical_approach_control_preserves_endpoint_and_splits_axes(step):
+    from leisaac.astra.diagnose import vertical_approach_targets
+
+    current = np.array([-0.54, -0.055, 0.1, 0, 0, 0, 1.0])
+    target = np.array([-0.54, -0.024, 0.04, 0, 0, 0, 1.0])
+    rows = vertical_approach_targets(current, target, step_m=step)
+    np.testing.assert_array_equal(rows[-1], target)
+    assert rows[0][2] == current[2]
+    for row in rows:
+        np.testing.assert_array_equal(row[:2], target[:2])
+        assert row[6] == 1
+    if step:
+        assert np.max(np.abs(np.diff([row[2] for row in rows]))) <= step + 1e-12
+
+
+def test_failed_tracking_records_bounded_history_and_elapsed_time(monkeypatch):
+    from types import SimpleNamespace
+    from inspect_robots import Action, ActionChunk, Observation
+    from leisaac.astra import embodiment
+
+    emb = embodiment.XTrainerEmbodiment.__new__(embodiment.XTrainerEmbodiment)
+    target = np.array([0.0, 0.0, 0.2, 0, 0, 0, 1])
+    actual = target.copy()
+    actual[2] += 0.005
+    obs = Observation(state={"eef_state": actual})
+    emb.current, emb.consumed = obs, False
+    emb.action_trace = []
+    emb.timing = {"execute": 0.0}
+    emb.right_ids = [0]
+
+    class Joints:
+        def __getitem__(self, key):
+            return self
+
+        def cpu(self):
+            return self
+
+        def tolist(self):
+            return [0.0]
+
+    emb.robot = SimpleNamespace(data=SimpleNamespace(joint_pos=Joints()))
+    times = iter([10.0, 12.0])
+    monkeypatch.setattr(embodiment.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(emb, "pre_check", lambda rows: None)
+    ticks = []
+    monkeypatch.setattr(emb, "physics", lambda row: ticks.append(row.copy()))
+    monkeypatch.setattr(emb, "state", lambda: actual.copy())
+    monkeypatch.setattr(
+        emb, "settle", lambda row: pytest.fail("must not settle after failure")
+    )
+    monkeypatch.setattr(
+        emb,
+        "observe",
+        lambda label: pytest.fail("must not publish failure as policy observation"),
+    )
+    with pytest.raises(RuntimeError, match="IK_tracking_failure"):
+        emb.execute(ActionChunk([Action(target)]), obs)
+    assert len(ticks) == 30
+    assert len(emb.action_trace[-1]["tracking_samples"]) == 30
+    assert emb.action_trace[-1]["tracking_samples"][-1][
+        "position_error_m"
+    ] == pytest.approx(0.005)
+    assert emb.timing["execute"] == 2.0
+    assert emb.consumed
+
+
+@pytest.mark.parametrize("step", [0.0, -0.005, float("nan"), 0.000001])
+def test_vertical_control_rejects_invalid_or_unbounded_partition(step):
+    from leisaac.astra.diagnose import vertical_approach_targets
+
+    current = np.array([-0.54, -0.055, 0.1, 0, 0, 0, 1.0])
+    target = np.array([-0.54, -0.024, 0.04, 0, 0, 0, 1.0])
+    with pytest.raises(ValueError, match="partition"):
+        vertical_approach_targets(current, target, step_m=step)
