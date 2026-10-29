@@ -344,6 +344,35 @@ including result, phase timings, recording, action/observation traces and termin
 images. **76 focused tests PASS**, credential-content and diff audits PASS.
 No further model request, hardware access or push occurred.
 
+## Subsequent authorized separate-closure mission
+
+`mission-6-separate-close` ran once from `3be420422b1642c3876225124422d22844ab9f6e`
+with unchanged provider/model/agent and limits (12 requests, 12 decisions,
+384 waypoints, 600 s). Result: **FAIL / model_timeout**, exact error
+`provider request timed out`. No automatic retry occurred.
+
+Request 1 returned HTTP 200 after 55.450 s; its open-gripper move produced
+31 completed waypoints, settle and fresh observation (generation 1 -> 2).
+Request 2 used the established connection, finished sending its request body
+at 0.042869 s, then failed while receiving response headers at 60.103233 s;
+the recorded exception class is `ReadTimeout`. This localizes the failure to
+waiting for HTTP response headers, not connection setup, TLS negotiation or
+request upload. It does not isolate relay versus upstream service latency,
+nor prove that a longer deadline would succeed. No timeout settings changed.
+
+There were two transmitted requests and one policy decision. No closure, lift,
+transport or release sequence was reached, so autonomous validation of the new
+closure rule remains incomplete. Known usage: 3,163 input + 125 output = 3,288
+tokens; timed-out request usage is unknown. Episode duration was 126.411 s
+excluding Kit startup/preflight; model transport total 115.554 s. Render,
+validation, execution and settle were 1.089 / 0.018 / 3.198 / 1.283 s.
+Evaluator success=false, grasp_seen=false, closed_command_seen=false.
+
+Primary result, metadata-only phase timings, HDF5, actions, observations and
+failure images remain in `.agents/runs/xtrainer-astra/mission-6-separate-close/`.
+76 focused tests PASS; credential-content audit and diff review PASS.
+No physical hardware access or push; no further episode was launched.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**
