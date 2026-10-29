@@ -531,6 +531,21 @@ provider requests, credentials, physical hardware or push. The original failed
 model coordinates are not made safe by an overlay; new-policy effectiveness is
 NOT_RUN and must not be reported as an autonomous grasp fix.
 
+## Wrist-reference live attempt: blocked before transmission
+
+The authorized `mission-8-wrist-reference` launch from `4cc48b4` stopped in
+host proxy selection, before container/client initialization. The only configured,
+validated local proxy refused TCP connections (`ConnectionRefusedError`, errno 111);
+no listener was present. CONNECT, relay TLS and model responses were therefore
+not reached. This is a local proxy availability blocker, not an Isaac or model
+failure. Zero model requests, decisions or waypoints; no paid episode was run.
+
+The startup log is retained at
+`.agents/runs/xtrainer-astra/mission-8-wrist-reference.log`; no episode directory
+was created. Provider/model/guard and default 60-second read timeout remain
+unchanged. Restore the configured local proxy before resuming the one authorized
+mission; no automatic paid retry, physical hardware access or push occurred.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**
