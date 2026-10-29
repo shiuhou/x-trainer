@@ -11,7 +11,9 @@ The frozen MuJoCo S5 experiments remain a separate historical baseline.
 `mission-1` remains FAIL. Both separately authorized post-fix Astra missions
 (`mission-2-postfix` and `mission-3-postfix`) ended with **FAIL / model_timeout
 on request 2**; scripted success is not autonomous-policy success. No automatic
-model retry was run.
+model retry was run. The subsequently authorized `mission-4-postfix` received
+four HTTP 200 responses but stopped at `IK_tracking_failure` during descent/closure;
+autonomous pick/place remains FAIL.
 
 The false closure timeout came from treating PhysX's reported velocity fields
 as actual transform motion under contact. PhysX documents that split-impulse
@@ -166,6 +168,45 @@ added **after** mission 3 and validated offline only; it cannot retrospectively
 identify that episode's timeout phase. Scoped checks: **62 adapter tests PASS**,
 Ruff/format, mypy (six own sources), compilation, shell syntax and credential-content
 audit PASS. No further provider call, physical hardware access or push occurred.
+
+## Renewed mission with transport phase tracing
+
+A separately authorized single `mission-4-postfix` ran from
+`191931d523da807dbec127216e55f638eb54e0af`, using the unchanged task, official agent,
+model, provider and action limits (12 requests / 12 decisions / 384 waypoints /
+600 seconds). All **four requests returned HTTP 200**, in 19.909, 21.829, 28.199
+and 16.138 seconds. Known usage totals **19,926 tokens**. No timeout or retry
+occurred; this does not retrospectively identify the cause of earlier timeouts.
+The metadata trace shows TLS completing in 0.549/0.530 seconds on the two new
+connections. Provider response-header waiting dominates model latency.
+
+The first three decisions executed and settled, with fresh generations 1 -> 2
+-> 3 -> 4. Decision 4 requested simultaneous descent from approximately Z65 mm
+to Z45 mm and closure to 0. The run completed 95 waypoints, then stopped at the
+next waypoint after the existing 30-control-step tracking bound:
+**FAIL / adapter_or_execution / `IK_tracking_failure`**.
+
+Terminal reference target was `[-0.550, -0.003, 0.045]` m; measured position was
+`[-0.552488, -0.001991, 0.048530]` m. Position error **4.434 mm** exceeded the
+unchanged 3 mm convergence threshold; orientation error norm **0.009588 rad**
+was within the 0.035 rad threshold. Measured aperture was 0.574489 at commanded
+0. Contact-constrained tracking is a hypothesis, not a demonstrated root cause;
+no gains, geometry, controller, timing or acceptance limits were changed.
+
+The upstream grasp heuristic became true, but maximum lift was effectively zero
+and there was no transport or release. `success=false`, `released=false`,
+`settled=false`; this is **not a verified physical grasp or autonomous success**.
+Total episode time was **107.244 s**, excluding Kit startup/preflight; model
+transport total 86.075 s. Recorded render/validation/execute/settle times were
+1.376/0.044/10.271/2.364 s. The existing execute accumulator excludes the final
+failed waypoint's tracking time, so it is not a complete execution-time measure.
+
+Local evidence: `.agents/runs/xtrainer-astra/mission-4-postfix/` contains result,
+phase timings, action/observation traces, HDF5 and stopped-state failure images.
+No duplicate launch, further model request, hardware access or push occurred.
+Focused adapter tests: **62 PASS**; credential-content and diff audits PASS.
+The next useful investigation is offline replay of this descent/closure and
+comparison with the successful privileged baseline, without relaxing limits.
 
 ## Historical live checkpoint
 
