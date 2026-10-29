@@ -480,6 +480,57 @@ with `comparison.json`, per-case physics/contact/action traces and images.
 compilation and diff review PASS. All old evidence and unrelated dirty work remain
 untouched. No model requests, credentials, physical hardware or push.
 
+## Robot-referenced wrist alignment overlay
+
+The wrist camera is offset and tilted, so the center of its image is not the
+geometric grip center. A new robot-only reference makes this distinction visible:
+a yellow ring projects the midpoint of the authored narrow finger region
+(wrist +Z182.646 mm); green +base-X and cyan +base-Y endpoints are 20 mm away in
+that plane. The public EEF reference remains +Z160 mm, all actions and physics
+remain unchanged. This is a visual interface correction, not an object detector,
+contact predictor, hidden target coordinate, or automatic correction of actions.
+
+The overlay uses current wrist FK, the authored ROS camera mounting transform,
+and simulated camera intrinsics. It reads no object pose, contact, segmentation,
+depth or evaluator state. Model-facing wrist RGB is now **annotated RGB** with
+unchanged shape/dtype; front/right RGB remain raw. Raw wrist images are retained
+as `*_wrist_raw.png` beside the annotated evidence. Observation traces record
+reference pixels separately from the unchanged model-facing EEF field. Tool docs
+explain the ring, axes and parallax: it references the grip plane, not arbitrary
+object depth, and image-center alignment is not equivalent to grip alignment.
+No real-camera calibration or sim-to-real visual parity is claimed.
+
+Native validation found a trap in the first implementation: this pinned
+Isaac Lab TiledCamera `_create_buffers()` initializes cached world pose, whereas
+`_update_buffers_impl()` refreshes pixels without refreshing pose. Using cached
+`data.pos_w/quat_w_ros` makes a robot-referenced overlay drift after motion. The
+final implementation instead composes the live wrist pose and authored mount,
+without modifying vendor code or invoking private sensor updates. This was a
+new annotation defect, **not an established cause of historical Astra failures**.
+The initial `grip-reference-full/` and inadvertently repeated old-code
+`grip-reference-fk-full/` failures are preserved; the latter followed a failed
+edit assertion, before the corrected source was applied. Both were offline only.
+
+The final `grip-reference-current-fk-full/` passes full privileged scripted
+approach, close, lift, transport, release and return-to-rest: 176 waypoints,
+759 controls, minimum held lift 65.053 mm, transport 214.513 mm, final evaluator
+success=true. All 759 controls, joint positions and cube poses match the prior
+successful scripted baseline exactly (maximum absolute difference zero).
+Across 12 fresh observations the projected center stays within
+u=[639.999817,640.000061], v=[480.920502,480.920959] pixels. The image center is
+(640,360), a roughly 121-pixel difference. Rendered annotations were visually
+reviewed at grasp; the ring lies between the fingers. This verifies reference
+geometry and non-interference with execution, **not autonomous perception success**.
+
+Tests cover pinhole projection, invalid/behind-camera points, unmodified raw RGB,
+output dimensions, fresh parent motion with no cached camera pose available,
+and absence of task-object access. **91 tests PASS**, scoped Ruff/format/mypy,
+compilation and diff review PASS. Evidence is under the existing
+`.agents/runs/xtrainer-astra/grasp-diagnosis/mission7-approach/` directory. No
+provider requests, credentials, physical hardware or push. The original failed
+model coordinates are not made safe by an overlay; new-policy effectiveness is
+NOT_RUN and must not be reported as an autonomous grasp fix.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**

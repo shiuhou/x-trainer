@@ -41,6 +41,7 @@ class XTrainerEmbodiment:
         from .task import RIGHT_BASE_IN_ROOT, GRASP_IN_WRIST, GRIPPING_REGION_WRIST_Z
 
         self.torch, self.math, self.env = torch, math_utils, env
+        self.grip_midpoint_wrist_z = sum(GRIPPING_REGION_WRIST_Z) / 2
         self.robot = env.scene["robot"]
         self.output, self.open_only = output, open_only
         self.limits = Limits(
@@ -85,6 +86,8 @@ class XTrainerEmbodiment:
         self.initial_cube = self.env.scene["cube"].data.root_pos_w.clone()
         self.max_lift = 0.0
         self.diagnostic_hook = None
+        self.raw_wrist_rgb: np.ndarray | None = None
+        self.visual_reference: dict[str, Any] = {}
         self.configure_views()
         self.info = EmbodimentInfo(
             name="xtrainer_isaac_right_simulation",
@@ -120,6 +123,12 @@ class XTrainerEmbodiment:
                 "After closure, lift/transport may keep the same closed gripper command. "
                 "State gripper is measured position, which can differ from a closed command under contact. "
                 "front_rgb and right_rgb are fixed workspace views; wrist_rgb follows the right wrist. "
+                "Wrist RGB has a yellow ring projecting the geometric finger contact midpoint, "
+                "with +base-X green and +base-Y cyan endpoints 20 mm from that point in its plane. "
+                "These robot-only annotations are NOT detected object targets. The image center "
+                "is NOT the grip center because the wrist camera is offset and tilted. "
+                "Compare object location with the grip-plane ring and axis directions, allowing "
+                "for depth/parallax; verify clearance in the other views before descent. "
                 f"Maximum Cartesian path per decision {self.limits.chunk_path_m} m, "
                 f"maximum {self.limits.max_waypoints} interpolated waypoints. "
                 "A failed IK/tracking check aborts execution. After each chunk, physics settles and fresh images arrive. "
@@ -193,6 +202,52 @@ class XTrainerEmbodiment:
             dtype=np.float64,
         )
 
+    def annotate_wrist(self, rgb: np.ndarray) -> np.ndarray:
+        """Project only own-link geometry and base axes through the actual camera."""
+        from .visual_reference import draw_reference, project_reference
+
+        t = self.torch
+        sensor = self.env.scene["wrist_rgb"]
+        wrist_p = self.robot.data.body_pos_w[0, self.wrist_id]
+        wrist_q = self.robot.data.body_quat_w[0, self.wrist_id]
+        midpoint = self.grip_midpoint_wrist_z
+        local = t.tensor([0.0, 0.0, midpoint], device=self.device)
+        center = wrist_p + self.math.quat_apply(wrist_q, local)
+        offsets = t.tensor(
+            [[0.0, 0.0, 0.0], [0.02, 0.0, 0.0], [0.0, 0.02, 0.0]], device=self.device
+        )
+        world = center + self.math.quat_apply(
+            self.robot.data.root_quat_w.expand(3, -1), offsets
+        )
+        # TiledCamera in this pinned Isaac version caches world pose at reset.
+        # Compose the live parent FK and authored camera offset instead.
+        if sensor.cfg.offset.convention != "ros":
+            raise RuntimeError("wrist_reference_requires_ros_camera_offset")
+        camera_p, camera_q = self.math.combine_frame_transforms(
+            wrist_p.reshape(1, 3),
+            wrist_q.reshape(1, 4),
+            t.tensor([sensor.cfg.offset.pos], device=self.device),
+            t.tensor([sensor.cfg.offset.rot], device=self.device),
+        )
+        camera_points = (
+            self.math.quat_apply(
+                self.math.quat_inv(camera_q).expand(3, -1),
+                world - camera_p,
+            )
+            .cpu()
+            .numpy()
+        )
+        intrinsics = sensor.data.intrinsic_matrices[0].cpu().numpy()
+        pixels = project_reference(camera_points, intrinsics)
+        self.visual_reference = {
+            "source": "robot_geometry_and_camera_only",
+            "plane": "finger_contact_midpoint",
+            "pixels": pixels.tolist(),
+            "axis_length_m": 0.02,
+            "object_state_used": False,
+        }
+        return draw_reference(rgb, pixels)
+
     def capture_images(self) -> tuple[dict, dict]:
         """Render current physics state, without advancing simulation."""
         self.env.sim.render()
@@ -203,6 +258,8 @@ class XTrainerEmbodiment:
             sensor.update(0.0, force_recompute=True)
             images[name] = sensor.data.output["rgb"][0, ..., :3].cpu().numpy().copy()
             frames[name] = int(sensor.frame[0].item())
+        self.raw_wrist_rgb = images["wrist_rgb"].copy()
+        images["wrist_rgb"] = self.annotate_wrist(images["wrist_rgb"])
         return images, frames
 
     def diagnostic_capture(self, label: str) -> dict[str, Any]:
@@ -210,6 +267,10 @@ class XTrainerEmbodiment:
         started = time.monotonic()
         sim_time = float(self.env.sim.current_time)
         images, frames = self.capture_images()
+        if self.raw_wrist_rgb is not None:
+            Image.fromarray(self.raw_wrist_rgb).save(
+                self.output / f"{label}_wrist_raw.png"
+            )
         if float(self.env.sim.current_time) != sim_time:
             raise RuntimeError("diagnostic_capture_advanced_physics")
         montage = Image.new("RGB", (1920, 480))
@@ -231,6 +292,10 @@ class XTrainerEmbodiment:
     def observe(self, label: str) -> Observation:
         started = time.monotonic()
         images, frames = self.capture_images()
+        if self.raw_wrist_rgb is not None:
+            Image.fromarray(self.raw_wrist_rgb).save(
+                self.output / f"{label}_wrist_raw.png"
+            )
         generation = self.generation + 1
         sim_time = float(self.env.sim.current_time)
         self.freshness.accept(generation, sim_time, images, frames)
@@ -248,6 +313,7 @@ class XTrainerEmbodiment:
                 "generation": generation,
                 "sim_time": sim_time,
                 "host_monotonic": time.monotonic(),
+                "visual_reference": self.visual_reference,
                 "sensor_frames": frames,
                 "eef_state": obs.state["eef_state"].tolist(),
                 "images": {

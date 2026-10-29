@@ -148,6 +148,8 @@ def test_model_observation_contains_only_images_and_measured_state(
         scene={name: Camera(shape) for name, shape in CAMERAS.items()},
     )
     emb.output = tmp_path
+    emb.visual_reference = {}
+    monkeypatch.setattr(emb, "annotate_wrist", lambda rgb: rgb.copy())
     emb.generation, emb.ticks = 0, 3
     emb.freshness = Freshness()
     emb.instruction = "Pick up the cube."
@@ -1280,3 +1282,78 @@ def test_vertical_control_rejects_invalid_or_unbounded_partition(step):
     target = np.array([-0.54, -0.024, 0.04, 0, 0, 0, 1.0])
     with pytest.raises(ValueError, match="partition"):
         vertical_approach_targets(current, target, step_m=step)
+
+
+def test_grip_reference_projects_robot_points_without_modifying_rgb():
+    from leisaac.astra.visual_reference import project_reference, draw_reference
+
+    k = np.array([[400.0, 0, 320], [0, 400, 240], [0, 0, 1]])
+    points = np.array([[0.01, -0.02, 0.2], [0.03, -0.02, 0.2], [0.01, 0, 0.2]])
+    pixels = project_reference(points, k)
+    np.testing.assert_allclose(pixels, [[340, 200], [380, 200], [340, 240]])
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    annotated = draw_reference(rgb, pixels)
+    assert annotated.shape == rgb.shape and annotated.dtype == rgb.dtype
+    assert not rgb.any() and annotated.any()
+    assert np.array_equal(annotated, draw_reference(rgb, pixels))
+
+
+@pytest.mark.parametrize("z", [0.0, -0.1, float("nan")])
+def test_grip_reference_rejects_invalid_projection(z):
+    from leisaac.astra.visual_reference import project_reference
+
+    with pytest.raises(ValueError, match="projection"):
+        project_reference(np.array([[0.0, 0.0, z]] * 3), np.eye(3))
+
+
+def test_wrist_reference_uses_current_parent_not_cached_camera_pose():
+    from types import SimpleNamespace
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+
+    class Tensor(np.ndarray):
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return np.asarray(self)
+
+        def expand(self, n, _):
+            return np.broadcast_to(self, (n, 4)).view(Tensor)
+
+    def tensor(value, **kwargs):
+        return np.asarray(value, dtype=float).view(Tensor)
+
+    identity = tensor([[1, 0, 0, 0]])
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.torch = SimpleNamespace(tensor=tensor)
+    emb.math = SimpleNamespace(
+        quat_apply=lambda q, p: p,
+        quat_inv=lambda q: q,
+        combine_frame_transforms=lambda p, q, offset, rot: (p + offset, rot),
+    )
+    emb.device, emb.wrist_id, emb.grip_midpoint_wrist_z = "cpu", 0, 0.18
+    emb.robot = SimpleNamespace(
+        data=SimpleNamespace(
+            body_pos_w=tensor([[[0, 0, 0]]]),
+            body_quat_w=identity.reshape(1, 1, 4),
+            root_quat_w=identity,
+        )
+    )
+    # No cached camera world pose, object asset, segmentation or evaluator exists.
+    camera = SimpleNamespace(
+        cfg=SimpleNamespace(
+            offset=SimpleNamespace(convention="ros", pos=(0, 0, 0), rot=(1, 0, 0, 0))
+        ),
+        data=SimpleNamespace(
+            intrinsic_matrices=tensor([[[400, 0, 320], [0, 400, 240], [0, 0, 1]]])
+        ),
+    )
+    emb.env = SimpleNamespace(scene={"wrist_rgb": camera})
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    before = emb.annotate_wrist(rgb)
+    expected = np.array(emb.visual_reference["pixels"])
+    emb.robot.data.body_pos_w = tensor([[[0.4, -0.2, 0.3]]])
+    after = emb.annotate_wrist(rgb)
+    np.testing.assert_allclose(emb.visual_reference["pixels"], expected, atol=1e-10)
+    np.testing.assert_allclose(expected[0], [320, 240])
+    assert before.any() and after.any() and not rgb.any()
