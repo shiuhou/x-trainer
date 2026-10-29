@@ -383,6 +383,7 @@ def test_live_measured_aperture_does_not_reject_open_only_interpolation(
     emb.limits = Limits(chunk_path_m=0.01, max_waypoints=32)
     emb.current = Observation(state={"eef_state": state})
     emb.consumed = False
+    emb.last_gripper_command = 1.0
     emb.pre_check_rejections = []
     emb.timing = {"validation": 0.0}
     monkeypatch.setattr(emb, "state", lambda: state)
@@ -1096,3 +1097,66 @@ def test_recorded_targets_reject_invalid_or_implicit_targets(tmp_path, target):
     )
     with pytest.raises(ValueError):
         recorded_targets(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "last_command,measured,target_grip,dz,rejected",
+    [
+        (1.0, 1.0, 0.0, -0.02, True),
+        (1.0, 1.0, 0.5, -0.005, True),
+        (1.0, 1.0, 0.0, 0.0, False),
+        (1.0, 1.0, 0.0, -0.00005, False),
+        (1.0, 1.0, 0.0, -0.004, True),
+        (1.0, 0.99999995, 1.0, 0.02, False),
+        (1.0, 0.9998, 1.0, 0.02, False),
+        (0.0, 0.57449, 0.0, 0.02, False),
+    ],
+)
+def test_official_tool_enforces_separate_closure(
+    last_command, measured, target_grip, dz, rejected, monkeypatch
+):
+    from types import SimpleNamespace
+    from inspect_robots import Observation, ObservationSpace, StateSpec, StateField
+    from inspect_robots_agent._tools import build_toolset
+    from leisaac.astra.embodiment import XTrainerEmbodiment
+
+    state = np.array([-0.55, -0.003, 0.065, 0, 0, 0, measured])
+    emb = XTrainerEmbodiment.__new__(XTrainerEmbodiment)
+    emb.limits, emb.open_only = Limits(), False
+    emb.current = Observation(state={"eef_state": state})
+    emb.consumed = False
+    emb.last_gripper_command = last_command
+    emb.pre_check_rejections = []
+    emb.timing = {"validation": 0.0}
+    monkeypatch.setattr(emb, "state", lambda: state)
+    space = ObservationSpace(state=StateSpec((StateField("eef_state", (7,)),)))
+    tools = build_toolset(emb.action_space(), space, 10.0, pre_check=emb.pre_check)
+    targets = {"gripper": target_grip}
+    if dz:
+        targets["z"] = state[2] + dz
+    call = SimpleNamespace(
+        name="move_to",
+        arguments=json.dumps(
+            {"targets": targets, "note": "Offline sequencing regression."}
+        ),
+    )
+    result = tools.execute(call, emb.current)
+    if rejected:
+        assert result.chunk is None
+        assert "separate_descent_and_close" in result.error
+    else:
+        assert result.error is None and result.chunk is not None
+    assert (
+        emb.last_gripper_command == last_command
+    )  # validation has no execution side effects
+
+
+def test_closure_validation_rejects_move_then_close_inside_one_chunk():
+    from leisaac.astra.contracts import validate_closure_sequence
+
+    current = np.array([-0.55, 0, 0.065, 0, 0, 0, 1.0])
+    rows = np.tile(current, (3, 1))
+    rows[:, 2] -= 0.01
+    rows[-1, 6] = 0
+    with pytest.raises(ValueError, match="separate_descent_and_close"):
+        validate_closure_sequence(rows, current, 1.0)

@@ -274,6 +274,46 @@ next change would explicitly express open-descent/settle-before-close sequencing
 in the policy interface and validate it offline; this investigation does not
 silently rewrite live model actions or authorize another paid episode.
 
+## Separate approach and closure contract
+
+Following the mission-4 diagnosis, embodiment tool documentation now requires
+open-gripper approach/descent, settled fresh observation, then a separate
+`move_to` specifying only `gripper` (omit XYZ). This keeps object coordinates out
+of the instruction and leaves the official tool/interpolator unchanged.
+
+The production `pre_check` rejects a new closure if any waypoint leaves the
+current position's existing 3 mm reached envelope. The same shared constant is
+used by execution convergence; this does not loosen the old tracking threshold.
+Tiny hold corrections within that envelope remain legal, so a previously reached
+explicit position can still be held while closing. A rejection explains the two
+required calls to the agent; no action is silently split or executed. Any agent
+re-query still consumes the unchanged shared model-call budget.
+
+Closure is compared with the **last executed gripper command**, not measured
+aperture: a closed gripper holding a cube can measure about 0.57. Keeping its
+existing command of 0 during lift/transport must remain legal. The measured
+observation is never replaced with the command. Further tightening from a partial
+closure during translation is rejected; pure closure and open approach pass.
+
+Offline tests exercise the real official tool/pre-check path for the original
+20 mm descent/closure, partial closure, gripper-only closure, residual hold
+correction, open approach and contact-limited closed-grasp transport. A whole
+chunk that moves then closes is also rejected before execution. **76 tests PASS**;
+scoped Ruff/format, mypy and compilation PASS. No new Astra trial is authorized
+or performed by this change. Historical failed recordings remain unchanged;
+new recorded Cartesian diagnosis now encounters this stricter production gate.
+
+One full privileged scripted regression with the final gate passes: 176 waypoints,
+65.053 mm minimum held lift, 214.513 mm transport, release, return-to-rest and
+upstream/evaluator success. Evidence: the existing `mission4-tracking/` directory's
+`sequence-guard-full-corrected/`. An earlier `sequence-guard-full/` run rejected
+open descent because its interpolation started below commanded aperture 1; that
+failed candidate is retained. The final gate checks actual closing relative to
+both measured starting aperture and previous command, rather than treating all
+below-command intermediate samples as new closure. A measured-0.9998/open-target
+regression covers this defect. These were zero-provider offline runs, not a new
+autonomous success claim.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**

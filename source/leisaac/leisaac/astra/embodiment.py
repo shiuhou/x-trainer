@@ -23,12 +23,14 @@ from inspect_robots import (
 from .contracts import (
     CAMERAS,
     LABELS,
+    TRACKING_POSITION_M,
     Freshness,
     Limits,
     aperture_to_joints,
     measured_aperture,
     measured_motion,
     settling_sample_valid,
+    validate_closure_sequence,
 )
 
 
@@ -76,6 +78,7 @@ class XTrainerEmbodiment:
         self.consumed = False
         self.instruction = ""
         self.step_count = 0
+        self.last_gripper_command = 1.0
         self.closed_seen = False
         self.grasp_seen = False
         self.max_left_drift = 0.0
@@ -104,6 +107,10 @@ class XTrainerEmbodiment:
                 "its midpoint is approximately 22.646 mm below the reported reference in base Z at the fixed orientation. "
                 "yaw,pitch,roll are reset-relative radians and must all be zero. "
                 "Gripper 0 closes, 1 opens; always explicitly specify gripper for every move. "
+                "For grasping, move to the approach/grasp position with gripper=1, "
+                "then wait for the fresh settled observation. Close in a separate move_to "
+                "with only gripper specified (omit XYZ). Moving while newly closing is rejected. "
+                "After closure, lift/transport may keep the same closed gripper command. "
                 "State gripper is measured position, which can differ from a closed command under contact. "
                 "front_rgb and right_rgb are fixed workspace views; wrist_rgb follows the right wrist. "
                 f"Maximum Cartesian path per decision {self.limits.chunk_path_m} m, "
@@ -260,7 +267,10 @@ class XTrainerEmbodiment:
         try:
             if self.current is None or self.consumed:
                 raise ValueError("stale_observation")
-            self.limits.validate(np.asarray(rows), self.state())
+            rows = np.asarray(rows)
+            current = self.state()
+            self.limits.validate(rows, current)
+            validate_closure_sequence(rows, current, self.last_gripper_command)
             if self.open_only and np.any(np.abs(rows[:, 6] - 1) > 1e-8):
                 raise ValueError("connectivity_requires_open_gripper")
         except ValueError as exc:
@@ -277,6 +287,7 @@ class XTrainerEmbodiment:
         fingers = t.tensor([aperture_to_joints(float(row[6]))], device=self.device)
         command = t.cat((self.left_initial, wrist, self.reset_quat, fingers), dim=-1)
         self.step_command(command)
+        self.last_gripper_command = float(row[6])
 
     def step_command(self, command: Any) -> None:
         """Normal physics and invariant checks, also used by recorded-action replay."""
@@ -361,7 +372,7 @@ class XTrainerEmbodiment:
                 state = self.state()
                 if (
                     tick + 1 >= minimum_ticks
-                    and np.linalg.norm(state[:3] - row[:3]) < 0.003
+                    and np.linalg.norm(state[:3] - row[:3]) < TRACKING_POSITION_M
                     and np.linalg.norm(state[3:6]) < 0.035
                 ):
                     break

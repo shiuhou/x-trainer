@@ -13,6 +13,7 @@ CAMERAS = {
     "wrist_rgb": (720, 1280, 3),
 }
 LABELS = ("x", "y", "z", "yaw", "pitch", "roll", "gripper")
+TRACKING_POSITION_M = 0.003
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,28 @@ class Limits:
             raise ValueError("waypoint_displacement_exceeded")
         if float(distances.sum()) > self.chunk_path_m + 1e-7:
             raise ValueError("chunk_path_exceeded")
+
+
+def validate_closure_sequence(
+    rows: NDArray, current: NDArray, last_gripper_command: float
+) -> None:
+    """Reject new closure during translation; carrying an existing grasp is legal.
+
+    Compare commands, not measured aperture: contact leaves a closed gripper
+    partly open. A stationary hold may correct residual error within the same
+    position tolerance already used to declare a waypoint reached.
+    """
+    closing = rows[-1, 6] < last_gripper_command - 1e-6 or np.any(
+        rows[:, 6] < min(current[6], last_gripper_command) - 1e-6
+    )
+    moving = np.any(
+        np.linalg.norm(rows[:, :3] - current[:3], axis=1) >= TRACKING_POSITION_M
+    )
+    if closing and moving:
+        raise ValueError(
+            "separate_descent_and_close: move with gripper=1 first; after fresh "
+            "observation close using gripper only, with XYZ omitted"
+        )
 
 
 def aperture_to_joints(
