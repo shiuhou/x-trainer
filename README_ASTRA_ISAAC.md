@@ -373,6 +373,48 @@ failure images remain in `.agents/runs/xtrainer-astra/mission-6-separate-close/`
 76 focused tests PASS; credential-content audit and diff review PASS.
 No physical hardware access or push; no further episode was launched.
 
+## Explicit 180-second read-timeout diagnostic
+
+The operator authorized a temporary read-timeout increase and one bounded trial.
+`mission-7-read180` used baseline `bcad4f6` plus the explicit
+`--diagnostic-read-timeout 180` option. The default remains 60 seconds; only HTTP
+read timeout changes, capped by remaining episode time. Connect/write/pool,
+provider routing, model, disabled retries, 12-call/12-decision/384-waypoint and
+600-second episode bounds remain unchanged. The existing phase-trace transport
+applies the option after shared transport timeout initialization, without editing
+the pinned shared runtime. Read timeout is an inactivity limit; the episode wall
+deadline remains the absolute bound. Future runs omit the flag to use the default.
+
+| Request | HTTP status | Transport wait (s) |
+| --- | ---: | ---: |
+| 1 | 200 | 23.588 |
+| 2 | 200 | 16.271 |
+| 3 | 200 | 25.386 |
+| 4 | 200 | 20.503 |
+
+All four returned within 60 seconds, including subsequent calls with tool history.
+Consequently this run **does not establish that 60 seconds was too short**, nor
+reproduce a relay/upstream fixed-time 502. It demonstrates that tool-history calls
+can succeed on this path, not that every history/payload is compatible. Historical
+timeouts/502 remain unexplained; no further retry or controlled history ablation
+was performed. Total known usage: **20,539 tokens**; model transport **85.749 s**;
+episode **105.519 s**, excluding Kit startup/preflight.
+
+The simulator episode separately failed at decision 4 with `IK_tracking_failure`:
+82 completed waypoints, three completed execution/settle/fresh-observation loops
+(generations 1 -> 2 -> 3 -> 4). All four tool targets specified gripper=1. The fourth
+requested an oblique open descent to `[-0.54,-0.024,0.04]` m. An intermediate
+waypoint stopped with **4.665 mm** position error against the existing 3 mm limit.
+This is not the prior simultaneous descent/closure command; no commanded closure,
+lift, transport or task success occurred. Contact/path obstruction is unconfirmed
+without separate offline diagnosis. No physical or acceptance parameters changed.
+
+Evidence: `.agents/runs/xtrainer-astra/mission-7-read180/` retains result, HTTP
+phase timings, actions, observations, physics recording and stopped-state images.
+**79 focused tests PASS**, scoped Ruff/format/mypy/compile/diff and credential-content
+audit PASS. No hardware, automatic retry or push. This opt-in diagnostic does not
+change the default timeout for future episodes or authorize another paid trial.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**

@@ -1160,3 +1160,46 @@ def test_closure_validation_rejects_move_then_close_inside_one_chunk():
     rows[-1, 6] = 0
     with pytest.raises(ValueError, match="separate_descent_and_close"):
         validate_closure_sequence(rows, current, 1.0)
+
+
+@pytest.mark.parametrize("remaining,expected", [(500.0, 180.0), (40.0, 40.0)])
+def test_explicit_read_timeout_override_preserves_other_deadlines(
+    monkeypatch, remaining, expected
+):
+    import httpx
+
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[1] / "scripts/astra")
+    )
+    from provider_trace import PhaseTraceTransport
+
+    original = dict(connect=60.0, read=60.0, write=60.0, pool=60.0)
+
+    def respond(request):
+        assert request.extensions["timeout"] == {**original, "read": expected}
+        return httpx.Response(200)
+
+    transport = PhaseTraceTransport(
+        httpx.MockTransport(respond), read_timeout_s=180, remaining=lambda: remaining
+    )
+    request = httpx.Request(
+        "POST", "https://example.invalid/responses", extensions={"timeout": original}
+    )
+    assert transport.handle_request(request).status_code == 200
+    assert original["read"] == 60
+    assert transport.requests == 1
+    transport.close()
+
+
+def test_read_timeout_override_requires_episode_budget(monkeypatch):
+    import httpx
+
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[1] / "scripts/astra")
+    )
+    from provider_trace import PhaseTraceTransport
+
+    with pytest.raises(ValueError, match="episode_budget"):
+        PhaseTraceTransport(
+            httpx.MockTransport(lambda r: httpx.Response(200)), read_timeout_s=180
+        )

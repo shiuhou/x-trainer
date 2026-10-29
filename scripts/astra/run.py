@@ -46,6 +46,7 @@ def arguments() -> argparse.Namespace:
         help="auto, direct, or a local HTTP(S) proxy URL",
     )
     parser.add_argument("--connect-result", type=Path)
+    parser.add_argument("--diagnostic-read-timeout", type=int, choices=(180,))
     parser.add_argument("--model", choices=("gpt-6-astra",), default="gpt-6-astra")
     from isaaclab.app import AppLauncher
 
@@ -258,7 +259,11 @@ def main() -> int:
             )
             from provider_trace import PhaseTraceTransport
 
-            phases = PhaseTraceTransport(transport.inner)
+            phases = PhaseTraceTransport(
+                transport.inner,
+                read_timeout_s=args.diagnostic_read_timeout,
+                remaining=budget.remaining,
+            )
             transport.inner = phases
             scene = Scene(id="xtrainer-isaac-" + args.mode, instruction=instruction)
             policy.reset(scene)
@@ -318,6 +323,7 @@ def main() -> int:
                     request_attempts=budget.requests,
                     usage=transport.events,
                     transport_phases=phases.events,
+                    configured_read_timeout_s=args.diagnostic_read_timeout or 60,
                     decisions_trace=decisions,
                     model=args.model,
                     model_seconds=transport.seconds,
