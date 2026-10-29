@@ -314,6 +314,36 @@ below-command intermediate samples as new closure. A measured-0.9998/open-target
 regression covers this defect. These were zero-provider offline runs, not a new
 autonomous success claim.
 
+## Live test of separate-closure contract
+
+One operator-authorized `mission-5-separate-close` ran from
+`fd809c8affce7719394902871552e6f53a386e1a` with the new closure contract and unchanged
+model/provider, 12-call/12-decision/384-waypoint/600-second limits. It stopped
+without retry: **FAIL / provider/API_error**, exact returned error:
+
+```text
+provider HTTP status 502: {"type": "upstream_error", "message": "Upstream service temporarily unavailable"}
+```
+
+Two requests were transmitted. Request 1 returned HTTP 200 in 39.403 seconds;
+one open-gripper decision completed 36 waypoints, settle and fresh generation
+1 -> 2. Request 2 finished sending at 0.041 seconds and received the 502 headers
+at 52.764 seconds (52.766 seconds total transport). This is an actual provider
+HTTP error, not a local timeout or Isaac execution failure. The relay's error
+does not isolate whether the relay itself or its upstream service failed.
+
+No closure, lift or transport occurred. Evaluator success=false, grasp_seen=false,
+released=true, settled=true. The new sequencing rule's autonomous grasp effect
+remains **NOT_VERIFIED**; the prior full scripted PASS is unchanged. Known usage:
+3,163 input + 126 output = **3,289 tokens**; request 2 returned no usage metadata.
+Episode time **103.809 seconds**, excluding Kit startup/preflight; model transport
+92.169 seconds, render 1.122, validation 0.010, execute 3.688, settle 1.279 seconds.
+
+Evidence is retained in `.agents/runs/xtrainer-astra/mission-5-separate-close/`,
+including result, phase timings, recording, action/observation traces and terminal
+images. **76 focused tests PASS**, credential-content and diff audits PASS.
+No further model request, hardware access or push occurred.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**
