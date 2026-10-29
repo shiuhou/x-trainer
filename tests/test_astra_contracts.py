@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -1049,3 +1050,49 @@ def test_transport_phase_trace_preserves_response_and_existing_trace(monkeypatch
     assert len(seen) == 2
     assert [event["attempt"] for event in transport.events] == [1, 2]
     transport.close()
+
+
+def test_recorded_targets_split_close_preserves_positions_and_source(tmp_path):
+    from leisaac.astra.diagnose import recorded_targets
+
+    original = {
+        "tools": [
+            {
+                "tool": "move_to",
+                "targets": {"x": -0.55, "y": -0.005, "z": 0.065, "gripper": 1},
+            },
+            {
+                "tool": "move_to",
+                "targets": {"x": -0.55, "y": -0.003, "z": 0.045, "gripper": 0},
+            },
+        ]
+    }
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps(original))
+    raw = recorded_targets(tmp_path)
+    split = recorded_targets(tmp_path, separate_close=True)
+    assert len(raw) == 2 and len(split) == 3
+    np.testing.assert_array_equal(split[0], raw[0])
+    np.testing.assert_array_equal(split[-1], raw[-1])
+    np.testing.assert_array_equal(split[1][:6], raw[-1][:6])
+    assert split[1][6] == 1
+    assert json.loads(path.read_text()) == original
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"x": 0, "y": 0, "z": float("nan"), "gripper": 0},
+        {"x": 0, "y": 0, "z": 0, "gripper": 2},
+        {"x": 0, "y": 0, "z": 0, "gripper": 0, "yaw": 0.1},
+        {"x": 0, "z": 0, "gripper": 0},
+    ],
+)
+def test_recorded_targets_reject_invalid_or_implicit_targets(tmp_path, target):
+    from leisaac.astra.diagnose import recorded_targets
+
+    (tmp_path / "result.json").write_text(
+        json.dumps({"tools": [{"tool": "move_to", "targets": target}]})
+    )
+    with pytest.raises(ValueError):
+        recorded_targets(tmp_path)

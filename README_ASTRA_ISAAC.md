@@ -208,6 +208,72 @@ Focused adapter tests: **62 PASS**; credential-content and diff audits PASS.
 The next useful investigation is offline replay of this descent/closure and
 comparison with the successful privileged baseline, without relaxing limits.
 
+## Offline replay: mission 4 descent/closure tracking failure
+
+Three bounded, credential-free, `--network none` episodes isolate the failure
+without changing upstream physics, collisions, gains, IK or acceptance limits.
+The original mission and successful scripted recordings remain read-only.
+
+1. **Raw 17D replay:** all 389 controls, joint positions/velocities and cube
+   poses/velocities exactly match the original (maximum absolute difference 0).
+   Raw replay does not enforce Cartesian convergence; its historical stability
+   label is not an acceptance result for this tracking failure.
+2. **Recorded Cartesian replay with contact reporting:** official `move_to`
+   interpolation reproduces the same 389 controls/states exactly, including
+   `IK_tracking_failure` at the final descent/closure waypoint. Read-only contact
+   reporting therefore did not change the trajectory.
+3. **Separated descent/closure:** preserve all model target coordinates, but
+   first descend with aperture=1 and settle, then close at that position. This
+   passes the unchanged 3 mm / 0.035 rad / 30-tick tracking limits and original
+   contact-settle checks: 101 waypoints, 385 controls. No lift was attempted.
+
+| Measurement | Simultaneous descent + closure | Open descent, settle, then closure |
+| --- | ---: | ---: |
+| Final waypoint position error | 4.434 mm: FAIL | 0.0447 mm: PASS |
+| Terminal position error after any settle | 4.434 mm | 0.0652 mm |
+| Remaining descent near first bilateral contact | 16.757 mm | 0.005 mm |
+| Terminal measured aperture | 0.57449 | 0.57296 |
+| Last 20 substeps mean finger normal loads | 7.877 / 7.584 N | 7.701 / 7.683 N |
+| Last 20 substeps mean cube/table normal load | 4.597 N | 0.0347 N |
+
+Loads are sums of absolute contact-normal forces, not net forces or physical
+force calibration. The sensor covers cube/finger and cube/table pairs, **not**
+finger/table pairs. It does not prove a direct finger/table collision.
+
+**Established cause for this episode:** closure establishes bilateral contact
+while 16.8 mm of descent remains and the cube is supported by the table. Continued
+downward tracking with the closed grasp loads the cube/table contact and settles
+into an offset equilibrium. Over the final ten control steps, reference position
+changes by at most 0.00163 mm, while the target residual stays 4.434 mm. This is
+contact-constrained tracking, not evidence that the free-space IK target is
+unreachable. Merely separating the same descent and closure removes the failure;
+no longer timeout, looser tolerance or target-coordinate correction is needed
+for this control case. It does not prove every coupled grasp is invalid.
+
+The successful privileged baseline already uses open descent -> settle -> close.
+Its geometry-derived reference target is `[-0.554470, -0.002233, 0.042761]` m;
+the model target differs by `[+4.470, -0.767, +2.239]` mm. Those coordinate
+errors were not necessary to cause this tracking failure: the unchanged model
+target passes the separated control. Earlier scripted lift/transport PASS is
+preserved, but the new separated case only establishes settled closure, **not**
+secure lift or full task success.
+
+The diagnostic CLI now supports `--diagnostic-case recorded` and `separated`
+with `--diagnostic-source <episode-directory>`. It reads explicit recorded
+`move_to` targets as JSON data, rather than using the old mission-1-specific
+Cartesian list. Inputs require finite, explicit XYZ/aperture and fixed rotation;
+normal embodiment validation still checks workspace, chunk and tracking limits.
+Contact reporting and target splitting apply only to offline diagnosis; the live
+policy, prompts and executor are unchanged. Raw result/physics/action/contact
+records and a compact `comparison.json` are in
+`.agents/runs/xtrainer-astra/grasp-diagnosis/mission4-tracking/`.
+
+Validation: **67 focused tests PASS**, scoped Ruff/format, mypy, compilation and
+diff checks PASS. No model requests, credentials, hardware or push. A defensible
+next change would explicitly express open-descent/settle-before-close sequencing
+in the policy interface and validate it offline; this investigation does not
+silently rewrite live model actions or authorize another paid episode.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**

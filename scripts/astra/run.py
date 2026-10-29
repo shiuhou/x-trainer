@@ -20,7 +20,16 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diagnostic-source", type=Path)
     parser.add_argument(
-        "--diagnostic-case", choices=("raw", "cartesian", "height", "contact", "full")
+        "--diagnostic-case",
+        choices=(
+            "raw",
+            "cartesian",
+            "height",
+            "contact",
+            "full",
+            "recorded",
+            "separated",
+        ),
     )
     parser.add_argument("--diagnostic-aperture", type=float, default=0.0)
     parser.add_argument("--center-cube", action="store_true")
@@ -73,7 +82,11 @@ def main() -> int:
             None if args.mode == "original" else str(args.output),
             original=args.mode == "original",
         )
-        if args.mode == "diagnose" and args.diagnostic_case == "contact":
+        if args.mode == "diagnose" and args.diagnostic_case in (
+            "contact",
+            "recorded",
+            "separated",
+        ):
             from leisaac.astra.diagnose import spawn_with_contact_reporting
 
             # Enable reporting only: preserve all collider and dynamics properties.

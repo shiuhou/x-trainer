@@ -34,6 +34,30 @@ def validate_replay_commands(actions: np.ndarray) -> None:
         raise ValueError("replay_nonfinite_controls")
 
 
+def recorded_targets(source: Path, *, separate_close: bool = False) -> list[np.ndarray]:
+    """Replay explicit tool targets as data, with an optional open descent control."""
+    tools = json.loads((source / "result.json").read_text())["tools"]
+    if not tools or len(tools) > 12:
+        raise ValueError("invalid_recorded_tool_count")
+    rows = []
+    for tool in tools:
+        target = tool.get("targets", {})
+        if (
+            tool.get("tool") != "move_to"
+            or not {"x", "y", "z", "gripper"} <= target.keys()
+        ):
+            raise ValueError("recorded_replay_requires_explicit_move_to")
+        row = np.array([target.get(name, 0.0) for name in LABELS], dtype=float)
+        if not np.isfinite(row).all() or not 0 <= row[6] <= 1 or np.any(row[3:6]):
+            raise ValueError("invalid_recorded_target")
+        if separate_close and row[6] == 0:
+            opened = row.copy()
+            opened[6] = 1
+            rows.append(opened)
+        rows.append(row)
+    return rows
+
+
 def load_replay(env: Any, source: Path) -> Any:
     """Upstream dataset reader and one initial reset_to, never state playback."""
     from isaaclab.utils.datasets import HDF5DatasetFileHandler
@@ -629,7 +653,11 @@ def run_diagnosis(
     if not np.isfinite(aperture) or not 0 <= aperture <= 1:
         raise ValueError("invalid_diagnostic_aperture")
     diagnostics = Diagnostics(emb)
-    contacts = ContactDiagnostics(diagnostics) if case == "contact" else None
+    contacts = (
+        ContactDiagnostics(diagnostics)
+        if case in ("contact", "recorded", "separated")
+        else None
+    )
     emb.diagnostic_hook = diagnostics
     result: dict[str, Any] = {
         "case": case,
@@ -646,6 +674,15 @@ def run_diagnosis(
     try:
         if case == "full":
             result.update(full_scripted_acceptance(emb, diagnostics))
+        elif case in ("recorded", "separated"):
+            emb.initialize_settled_scene()
+            emb.observe("initial")
+            for index, row in enumerate(
+                recorded_targets(source, separate_close=case == "separated")
+            ):
+                diagnostics.phase = "close" if row[6] == 0 else f"approach_{index + 1}"
+                move(emb, row)
+            result["outcome"] = "recorded_targets_settled"
         elif case == "raw":
             emb.observe("initial")
             actions = episode.data["actions"]
