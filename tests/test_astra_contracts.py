@@ -1357,3 +1357,116 @@ def test_wrist_reference_uses_current_parent_not_cached_camera_pose():
     np.testing.assert_allclose(emb.visual_reference["pixels"], expected, atol=1e-10)
     np.testing.assert_allclose(expected[0], [320, 240])
     assert before.any() and after.any() and not rgb.any()
+
+
+def test_tracking_hold_requires_recorded_failed_waypoint(tmp_path):
+    from leisaac.astra.diagnose import tracking_failure_target
+
+    target = [-0.52, -0.12, 0.25, 0, 0, 0, 1]
+    path = tmp_path / "actions.jsonl"
+    path.write_text(
+        json.dumps({"status": "IK_tracking_failure", "target": target}) + "\n"
+    )
+    assert np.array_equal(tracking_failure_target(tmp_path), target)
+    path.write_text(json.dumps({"status": "success", "target": target}) + "\n")
+    with pytest.raises(ValueError, match="tracking_failure_required"):
+        tracking_failure_target(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        [0] * 6,
+        [0, 0, 0, float("nan"), 0, 0, 1],
+        [0, 0, 0, 0.1, 0, 0, 1],
+        [0, 0, 0, 0, 0, 0, 2],
+    ],
+)
+def test_tracking_hold_rejects_malformed_failed_waypoint(tmp_path, target):
+    from leisaac.astra.diagnose import tracking_failure_target
+
+    (tmp_path / "actions.jsonl").write_text(
+        json.dumps({"status": "IK_tracking_failure", "target": target}) + "\n"
+    )
+    with pytest.raises(ValueError, match="invalid_failed_waypoint"):
+        tracking_failure_target(tmp_path)
+
+
+def test_tracking_hold_is_bounded_and_preserves_raw_prefix(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    from leisaac.astra.diagnose import tracking_hold
+
+    class Tensor(np.ndarray):
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return np.asarray(self)
+
+    def tensor(values):
+        return np.asarray(values, dtype=float).view(Tensor)
+
+    target = [-0.52, -0.12, 0.25, 0, 0, 0, 1]
+    (tmp_path / "actions.jsonl").write_text(
+        json.dumps({"status": "IK_tracking_failure", "target": target}) + "\n"
+    )
+    contact = NS(
+        sensor_paths=["test_link"],
+        filter_paths=["left_wrist", "right_wrist"],
+        get_contact_force_matrix=lambda dt: tensor([[[0, 0, 0], [0, 0, 0]]]),
+        get_net_contact_forces=lambda dt: tensor([[0, 0, 0]]),
+    )
+    manager = NS(
+        get_physics_sim_view=lambda: NS(
+            create_rigid_contact_view=lambda *a, **k: contact
+        )
+    )
+    monkeypatch.setitem(
+        sys.modules, "isaacsim.core.simulation_manager", NS(SimulationManager=manager)
+    )
+    data = NS(
+        joint_pos=tensor([[0] * 6]),
+        joint_pos_target=tensor([[0] * 6]),
+        joint_vel=tensor([[0] * 6]),
+        soft_joint_pos_limits=tensor([[[-1, 1]] * 6]),
+    )
+    robot = NS(
+        cfg=NS(prim_path="/World/envs/env_.*/Robot"),
+        data=data,
+        is_fixed_base=True,
+        root_physx_view=NS(get_jacobians=lambda: tensor([[np.eye(6)]])),
+    )
+    events = []
+    emb = NS(
+        robot=robot,
+        right_ids=list(range(6)),
+        wrist_id=1,
+        output=tmp_path,
+        env=NS(cfg=NS(sim=NS(dt=1 / 60))),
+        state=lambda: np.array(target),
+        observe=lambda label: events.append("observe"),
+        step_command=lambda c: events.append(("raw", c.copy())),
+        diagnostic_capture=lambda label: events.append("capture")
+        or {"policy_usable": False},
+        physics=lambda row: events.append(("hold", row.copy())),
+    )
+    actions = tensor([[0] * 17, [1] * 17])
+    result = tracking_hold(emb, NS(data={"actions": actions}), tmp_path, NS(phase=""))
+    assert events[0] == "observe" and events[3] == "capture"
+    np.testing.assert_array_equal(events[1][1], actions[0].reshape(1, 17))
+    np.testing.assert_array_equal(events[2][1], actions[1].reshape(1, 17))
+    assert len(events[4:]) == 120
+    assert all(e[0] == "hold" and np.array_equal(e[1], target) for e in events[4:])
+    saved = json.loads((tmp_path / "tracking_hold.json").read_text())
+    assert saved["live_failure_unchanged"] and len(saved["samples"]) == 121
+    assert result["extra_control_ticks"] == 120
+
+    # An invariant abort must propagate and retain the bounded prefix, not recover.
+    def abort(row):
+        raise RuntimeError("left_arm_drift")
+
+    emb.physics = abort
+    with pytest.raises(RuntimeError, match="left_arm_drift"):
+        tracking_hold(emb, NS(data={"actions": actions}), tmp_path, NS(phase=""))
+    interrupted = json.loads((tmp_path / "tracking_hold.json").read_text())
+    assert len(interrupted["samples"]) == 1

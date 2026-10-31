@@ -580,6 +580,55 @@ and 302-control-step HDF5 recording. The original blocked startup log remains
 intact; this launch used a separate resume log. Focused adapter tests: 91 PASS.
 No second episode, physical hardware access or push was performed.
 
+## Mission 8 offline tracking diagnosis: inter-arm wrist contact
+
+Three bounded, network-disabled diagnostic episodes reproduced the high-position
+failure and investigated the same target without another model request. The
+recorded Cartesian replay reproduced all 302 controls, joint positions/velocities,
+robot root and cube/plate states exactly (maximum absolute difference zero).
+Two raw-prefix/hold runs also matched that original prefix exactly.
+
+Explicit PhysX contact-force matrix entries identify **right wrist J2_6 contacting
+left wrist J1_6**, with equal/opposite 7.324–7.744 N forces throughout the sampled
+hold. This is an inter-arm contact obstruction, not the earlier cube/finger
+contact scenario. The minimum right-arm soft-limit margin was about 2.02 rad;
+limits were not active. The measured wrist Jacobian remained full rank with
+smallest singular value about 0.044 (mixed translation/rotation units; not a
+unit-independent conditioning certificate). Right joint target-versus-measured
+error persisted, reaching about 0.0068 rad on J2_3.
+
+Holding the exact failed waypoint for 120 additional control ticks (4 simulation
+seconds) reduced positional error only from 3.175 to 3.055 mm; none of the samples
+passed the original 3 mm/0.035 rad reach criteria. Merely extending the timeout
+by this amount did not resolve the obstruction. These observations establish
+wrist contact as the relevant execution constraint; no collision-disabled
+counterfactual or sole-cause claim is made. Upstream collisions, drives, evaluator,
+left-arm target and production 30-tick deadline remain unchanged.
+
+The reusable, offline-only `diagnose --diagnostic-case tracking_hold` first
+replays normal 17D controls after one initial reset, captures the original failed
+state, then applies only the recorded failed waypoint for at most 120 extra
+ticks. It records joint targets/measurements, limits, Jacobian singular values
+and wrist-pair/contact forces. Existing invariant/deadline checks remain active;
+interruptions retain the collected prefix and propagate. No provider is built,
+no credentials are mounted, no policy observations receive diagnostic state,
+and this extension is not a production recovery or autonomous mission PASS.
+Use `--diagnostic-source` pointing to a recorded tracking failure and a fresh
+`--output` directory with the existing network-disabled container entry.
+
+Evidence: `.agents/runs/xtrainer-astra/grasp-diagnosis/mission8-tracking/`,
+with `comparison.json`, `recorded/`, `hold/`, `hold-pairs/`, recordings and stopped
+images. Focused tests: 97 PASS; scoped Ruff/format, mypy and compilation PASS.
+No extra paid episode or physical hardware access occurred.
+
+Deployment status: Isaac assets/cameras, official Astra tool integration and
+normal physical execution are operational; the privileged full scripted
+pick/place baseline passes. Autonomous pick/place is still unaccepted. Existing
+Cartesian bounds and tracking aborts do not constitute a collision-free path
+planner. The next improvement should address paths near the stationary left arm,
+without disabling self-collision, moving the left arm implicitly or relaxing
+tracking thresholds. It is not an API-connectivity repair.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**

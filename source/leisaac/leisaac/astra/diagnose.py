@@ -659,6 +659,105 @@ def full_scripted_acceptance(emb: Any, diagnostics: Diagnostics) -> dict:
     }
 
 
+def tracking_failure_target(source: Path) -> np.ndarray:
+    """Require an explicit failed waypoint, not a model target or guessed pose."""
+    rows = [
+        json.loads(line) for line in (source / "actions.jsonl").read_text().splitlines()
+    ]
+    if not rows or rows[-1].get("status") != "IK_tracking_failure":
+        raise ValueError("tracking_failure_required")
+    target = np.asarray(rows[-1]["target"], dtype=float)
+    if target.shape != (7,) or not np.isfinite(target).all() or np.any(target[3:6]):
+        raise ValueError("invalid_failed_waypoint")
+    if not 0 <= target[6] <= 1:
+        raise ValueError("invalid_failed_waypoint")
+    return target
+
+
+def tracking_hold(
+    emb: Any, episode: Any, source: Path, diagnostics: Diagnostics
+) -> dict:
+    """Exact raw replay then diagnostic-only same-target hold; no policy recovery."""
+    from isaacsim.core.simulation_manager import SimulationManager
+
+    target = tracking_failure_target(source)
+    diagnostics.phase = "approach_raw_replay"
+    emb.observe("initial")
+    for command in episode.data["actions"]:
+        emb.step_command(command.reshape(1, 17))
+    # Preserve the original failure state before the explicitly offline experiment.
+    capture = emb.diagnostic_capture("reproduced_failure")
+    root = emb.robot.cfg.prim_path.replace(".*", "0")
+    view = SimulationManager.get_physics_sim_view().create_rigid_contact_view(
+        root + "/x_trainer_asm_0226_SLDASM/*",
+        [root + "/x_trainer_asm_0226_SLDASM/" + name for name in ("J1_6", "J2_6")],
+        max_contact_data_count=256,
+    )
+    rows = []
+    diagnostics.phase = "approach_diagnostic_hold"
+    try:
+        for tick in range(121):
+            if tick:
+                emb.physics(target)
+            data = emb.robot.data
+            ids = emb.right_ids
+            state = emb.state()
+            jac_index = emb.wrist_id - int(emb.robot.is_fixed_base)
+            jac = (
+                emb.robot.root_physx_view.get_jacobians()[0, jac_index][:, ids]
+                .cpu()
+                .numpy()
+            )
+            rows.append(
+                {
+                    "extra_control_ticks": tick,
+                    "position_error_m": float(np.linalg.norm(state[:3] - target[:3])),
+                    "orientation_error_rad": float(np.linalg.norm(state[3:6])),
+                    "eef_state": state.tolist(),
+                    "joint_pos": data.joint_pos[0, ids].cpu().tolist(),
+                    "joint_target": data.joint_pos_target[0, ids].cpu().tolist(),
+                    "joint_vel": data.joint_vel[0, ids].cpu().tolist(),
+                    "soft_joint_limits": data.soft_joint_pos_limits[0, ids]
+                    .cpu()
+                    .tolist(),
+                    "jacobian_singular_values": np.linalg.svd(
+                        jac, compute_uv=False
+                    ).tolist(),
+                    "wrist_pair_contact_forces_N": view.get_contact_force_matrix(
+                        emb.env.cfg.sim.dt
+                    )
+                    .cpu()
+                    .tolist(),
+                    "robot_net_contact_forces_N": view.get_net_contact_forces(
+                        emb.env.cfg.sim.dt
+                    )
+                    .cpu()
+                    .tolist(),
+                }
+            )
+    finally:
+        (emb.output / "tracking_hold.json").write_text(
+            json.dumps(
+                {
+                    "diagnostic_only": True,
+                    "live_failure_unchanged": True,
+                    "failed_target": target.tolist(),
+                    "sensor_paths": view.sensor_paths,
+                    "filter_paths": view.filter_paths,
+                    "samples": rows,
+                },
+                indent=2,
+            )
+        )
+    return {
+        "outcome": "diagnostic_hold_complete",
+        "failure_capture": capture,
+        "original_control_count": len(episode.data["actions"]),
+        "extra_control_ticks": 120,
+        "terminal_position_error_m": rows[-1]["position_error_m"],
+    }
+
+
 def run_diagnosis(
     emb: Any,
     episode: Any,
@@ -693,7 +792,9 @@ def run_diagnosis(
         ).hexdigest(),
     }
     try:
-        if case == "full":
+        if case == "tracking_hold":
+            result.update(tracking_hold(emb, episode, source, diagnostics))
+        elif case == "full":
             result.update(full_scripted_acceptance(emb, diagnostics))
         elif case in ("recorded", "separated", "vertical", "short_descent"):
             emb.initialize_settled_scene()
