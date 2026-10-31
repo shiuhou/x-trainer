@@ -546,6 +546,40 @@ was created. Provider/model/guard and default 60-second read timeout remain
 unchanged. Restore the configured local proxy before resuming the one authorized
 mission; no automatic paid retry, physical hardware access or push occurred.
 
+## Wrist-reference live mission: transport restored, tracking failure
+
+The single resumed `mission-8-wrist-reference` ran from `add7393` with the
+robot-only wrist annotation implemented in `4cc48b4`. The desktop proxy settings
+still referenced an inactive service. A running local Xray listener was identified
+and passed the existing credential-free HTTP CONNECT/TLS preflight; its address
+was supplied through the existing per-run proxy option, with no hardcoded port or
+guard change. Provider, model, default 60-second read timeout and
+12-request/12-decision/384-waypoint/600-second limits remained unchanged.
+
+Both transmitted Responses requests returned HTTP 200 (9.154 and 20.571 seconds),
+reporting `gpt-6-astra`. Two decisions produced generic `move_to` actions;
+70 waypoints completed before the next waypoint failed. Decision 1 completed
+execution, settle and a fresh observation (generation 1 -> 2). Decision 2 was an
+open-gripper horizontal move at reference Z=0.2557 m, not descent or closure.
+At its failing interpolated target, position error after 30 control ticks was
+3.175 mm, above the unchanged 3 mm limit; orientation error was 0.008408 rad.
+The adapter stopped with `IK_tracking_failure`, without automatic recovery.
+This trial does not establish the physical cause of that high-position tracking
+error or demonstrate improved autonomous grasping from the wrist annotation.
+
+Evaluator success, grasp and placement were false; no closure, meaningful lift,
+transport or grasp-release sequence occurred. Gripper-open and settled checks
+were true. Returned usage totals 17,063 tokens (16,807 input, 256 output).
+Episode time was 48.037 seconds excluding Kit startup: model 29.725, render 1.706,
+validation 0.014, execute 9.450 and settle 1.310 seconds. Provider waiting dominated.
+The stopped-state diagnostic image is not a new policy observation.
+
+Evidence is preserved in `.agents/runs/xtrainer-astra/mission-8-wrist-reference/`,
+including result, action/observation traces, raw wrist images, diagnostic montage
+and 302-control-step HDF5 recording. The original blocked startup log remains
+intact; this launch used a separate resume log. Focused adapter tests: 91 PASS.
+No second episode, physical hardware access or push was performed.
+
 ## Historical live checkpoint
 
 **Offline integration and live connectivity PASS; first autonomous mission FAIL.**
