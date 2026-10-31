@@ -1,0 +1,186 @@
+--- a/s5_common.py
++++ b/s5_common.py
+@@ -14,0 +15 @@
++import subprocess
+@@ -31 +31,0 @@
+-APPROVED_PROXY = "http://127.0.0.1:7890"
+@@ -32,0 +33,151 @@
++
++
++def validate_provider_proxy(base_url: str, proxy: str | None) -> str | None:
++    """Validate a local provider route, without a fixed proxy-port allowlist."""
++    if proxy is None:
++        return None
++    try:
++        parsed = urlsplit(proxy)
++        if (
++            base_url != APPROVED_RELAY
++            or parsed.scheme not in {"http", "https"}
++            or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
++            or parsed.username is not None
++            or parsed.password is not None
++            or parsed.path not in {"", "/"}
++            or parsed.query
++            or parsed.fragment
++            or any(c.isspace() for c in proxy)
++        ):
++            raise ValueError
++        port = (
++            parsed.port
++            if parsed.port is not None
++            else (443 if parsed.scheme == "https" else 80)
++        )
++        if not 1 <= port <= 65535:
++            raise ValueError
++    except ValueError:
++        raise S5Error(
++            "invalid_provider_configuration",
++            "proxy must be a local HTTP(S) endpoint for the configured relay",
++        ) from None
++    host = "[::1]" if parsed.hostname == "::1" else "127.0.0.1"
++    return f"{parsed.scheme}://{host}:{port}"
++
++
++def desktop_provider_proxies() -> list[str]:
++    """Read desktop proxy addresses as data, including saved settings when off.
++
++    Auto mode is an explicit application choice, independent of the desktop's
++    global toggle. Never scan listening ports or connect to unknown services.
++    """
++    candidates: list[str] = []
++    for protocol in ("https", "http"):
++        values = []
++        for key in ("host", "port"):
++            try:
++                result = subprocess.run(
++                    ["gsettings", "get", f"org.gnome.system.proxy.{protocol}", key],
++                    capture_output=True,
++                    text=True,
++                    timeout=1,
++                    check=False,
++                )
++            except (OSError, subprocess.TimeoutExpired):
++                return candidates
++            values.append(result.stdout.strip().strip("'\""))
++        host, port = values
++        # GNOME's https section identifies an HTTP CONNECT proxy for HTTPS
++        # destinations; it does not mean a TLS connection to the proxy itself.
++        if host in {"localhost", "127.0.0.1", "::1"} and port.isdecimal():
++            candidates.append(f"http://{'[::1]' if host == '::1' else host}:{port}")
++    return candidates
++
++
++def provider_proxy_preflight(base_url: str, proxy: str) -> bool:
++    """Credential-free HEAD: verify CONNECT and relay TLS, never call a model."""
++    validated = validate_provider_proxy(base_url, proxy)
++    assert validated is not None
++    try:
++        result = subprocess.run(
++            [
++                "curl",
++                "-q",
++                "--silent",
++                "--head",
++                "--output",
++                os.devnull,
++                "--write-out",
++                "%{http_code} %{ssl_verify_result}",
++                "--connect-timeout",
++                "2",
++                "--max-time",
++                "5",
++                "--noproxy",
++                "",
++                "--proxy",
++                validated,
++                base_url + "/",
++            ],
++            capture_output=True,
++            text=True,
++            timeout=6,
++            check=False,
++        )
++    except (OSError, subprocess.TimeoutExpired):
++        return False
++    fields = result.stdout.split()
++    return (
++        result.returncode == 0
++        and len(fields) == 2
++        and fields[0].isdigit()
++        and 200 <= int(fields[0]) <= 599
++        and fields[1] == "0"
++    )
++
++
++def select_provider_proxy(
++    base_url: str, env: dict[str, str], selection: str = "auto"
++) -> str | None:
++    """Resolve once before model calls; auto tries configured routes, not ports.
++
++    Explicit URL and direct modes never silently switch. Auto checks the S5
++    setting, standard proxy environment, then local desktop HTTP proxy settings.
++    Only verified, credential-free, loopback routes can become provider transport.
++    """
++    base_url = provider_base_url(base_url)
++    if selection == "direct":
++        return None
++    if selection != "auto":
++        return validate_provider_proxy(base_url, selection)
++    candidates = [
++        env.get(name, "")
++        for name in (
++            "S5_PROVIDER_HTTPS_PROXY",
++            "HTTPS_PROXY",
++            "https_proxy",
++            "ALL_PROXY",
++            "all_proxy",
++            "HTTP_PROXY",
++            "http_proxy",
++        )
++    ]
++    candidates += desktop_provider_proxies()
++    seen = set()
++    for candidate in candidates:
++        if not candidate or candidate in {"auto", "direct"}:
++            continue
++        try:
++            proxy = validate_provider_proxy(base_url, candidate)
++        except S5Error:
++            continue
++        if proxy is None or proxy in seen:
++            continue
++        seen.add(proxy)
++        if provider_proxy_preflight(base_url, proxy):
++            return proxy
++    raise S5Error(
++        "proxy_connect",
++        "no configured local HTTP(S) proxy passed CONNECT/TLS preflight; configure a running proxy or explicitly select direct mode",
++    )
+@@ -81,9 +231,0 @@
+-
+-
+-def validate_provider_proxy(base_url: str, proxy: str | None) -> str | None:
+-    if proxy is not None and (base_url != APPROVED_RELAY or proxy != APPROVED_PROXY):
+-        raise S5Error(
+-            "invalid_provider_configuration",
+-            "explicit proxy requires the approved relay and exact loopback proxy",
+-        )
+-    return proxy
+@@ -394 +536 @@
+-    validate_provider_proxy(selected, proxy)
++    proxy = validate_provider_proxy(selected, proxy)
+--- a/s5_agent.py
++++ b/s5_agent.py
+@@ -44,2 +44,4 @@
+-        self.connect_host = "127.0.0.1" if self.proxy else self.hostname
+-        self.connect_port = 7890 if self.proxy else 443
++        self.connect_host = (
++            urlsplit(self.proxy).hostname if self.proxy else self.hostname
++        )
++        self.connect_port = urlsplit(self.proxy).port if self.proxy else 443
+@@ -104,3 +106,2 @@
+-                # Exact operator-approved CONNECT transport boundary. Upstream
+-                # DNS belongs to the proxy; no fake IP is classified as public.
+-                self.addresses = {"127.0.0.1"}
++                # Selected local CONNECT transport; the proxy owns provider DNS.
++                self.addresses = {str(self.connect_host)}
