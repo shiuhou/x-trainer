@@ -1,0 +1,15 @@
+# Official X-Trainer recipe, pinned to the resolved digest in isaac-image.lock.
+ARG ISAAC_IMAGE=nvcr.io/nvidia/isaac-lab:2.1.0
+FROM ${ISAAC_IMAGE}
+USER root
+WORKDIR /workspace/x-trainer
+# Installation runs inside the image's existing Isaac Python environment.
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+    'httpx==0.28.1' 'websockets==14.2' pillow pyyaml psutil deepdiff \
+    pyserial feetech-servo-sdk pynput flask flask-cors scipy gitpython \
+    ast-serialize pytest ruff mypy
+COPY inspect-robots /opt/inspect-robots
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --no-deps \
+    /opt/inspect-robots /opt/inspect-robots/plugins/inspect-robots-agent
+ENV LEISAAC_ASSETS_ROOT=/workspace/x-trainer/assets
+ENV PYTHONPATH=/workspace/x-trainer/source/leisaac:/opt/inspect-robots/src:/opt/inspect-robots/plugins/inspect-robots-agent/src
